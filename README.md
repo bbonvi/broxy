@@ -68,11 +68,51 @@ rules:
 ## Usage
 
 ```bash
-# Run with default config file (rules.yaml)
-./broxy
+# Run with default config file (~/.config/broxy/rules.yaml)
+./broxy run
 
 # Run with custom config file
-./broxy -config /path/to/config.yaml
+./broxy run -config /path/to/config.yaml
+```
+
+## Running as a Service (macOS)
+
+Create a LaunchAgent plist file at `~/Library/LaunchAgents/com.broxy.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.broxy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/broxy</string>
+        <string>run</string>
+        <string>-config</string>
+        <string>/Users/YOUR_USERNAME/.config/broxy/rules.yaml</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/.config/broxy/broxy.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/.config/broxy/broxy.error.log</string>
+</dict>
+</plist>
+```
+
+Then load the service:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.broxy.plist
+```
+
+To stop the service:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.broxy.plist
 ```
 
 ## Configuration Options
