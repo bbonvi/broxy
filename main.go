@@ -2,16 +2,59 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 
 	"broxy/config"
+	"broxy/install"
 	"broxy/router"
 	"broxy/server"
 )
 
+func getDefaultConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "rules.yaml"
+	}
+	return filepath.Join(home, ".config", "broxy", "rules.yaml")
+}
+
 func main() {
-	configFile := flag.String("config", "rules.yaml", "Path to configuration file")
-	flag.Parse()
+	// Check for subcommands
+	if len(os.Args) < 2 {
+		printHelp()
+		os.Exit(1)
+	}
+
+	switch os.Args[1] {
+	case "run":
+		runProxy()
+	case "install":
+		if err := install.Install(); err != nil {
+			log.Fatalf("Installation failed: %v", err)
+		}
+	case "uninstall":
+		if err := install.Uninstall(); err != nil {
+			log.Fatalf("Uninstallation failed: %v", err)
+		}
+	case "help", "-h", "--help":
+		printHelp()
+	case "version", "-v", "--version":
+		fmt.Println("broxy version 1.0.0")
+	default:
+		fmt.Printf("Unknown command: %s\n\n", os.Args[1])
+		printHelp()
+		os.Exit(1)
+	}
+}
+
+func runProxy() {
+	// Parse flags for run command
+	runCmd := flag.NewFlagSet("run", flag.ExitOnError)
+	configFile := runCmd.String("config", getDefaultConfigPath(), "Path to configuration file")
+	runCmd.Parse(os.Args[2:])
 
 	// Load configuration
 	cfg, err := config.Load(*configFile)
@@ -27,4 +70,23 @@ func main() {
 	if err := srv.Start(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
+}
+
+func printHelp() {
+	fmt.Println("Broxy - Simple Proxy Forwarder")
+	fmt.Println("\nUsage:")
+	fmt.Println("  broxy [command]")
+	fmt.Println("\nCommands:")
+	fmt.Println("  run         Run the proxy server")
+	fmt.Println("  install     Install broxy as a system service")
+	fmt.Println("  uninstall   Uninstall broxy system service")
+	fmt.Println("  help        Show this help message")
+	fmt.Println("  version     Show version information")
+	fmt.Println("\nRun Flags:")
+	fmt.Println("  -config string")
+	fmt.Printf("        Path to configuration file (default: %s)\n", getDefaultConfigPath())
+	fmt.Println("\nExamples:")
+	fmt.Println("  broxy install                        # Install as system service")
+	fmt.Println("  broxy run                            # Run with default config")
+	fmt.Println("  broxy run -config /path/to/rules.yaml  # Run with custom config")
 }
