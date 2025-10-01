@@ -147,6 +147,9 @@ func (s *Server) Start() error {
 
 	// Start goroutine to handle file changes
 	go func() {
+		var debounceTimer *time.Timer
+		var debounceMu sync.Mutex
+
 		for {
 			select {
 			case event, ok := <-watcher.Events:
@@ -155,17 +158,26 @@ func (s *Server) Start() error {
 				}
 				// Handle Write, Create, Remove events (editors often do atomic writes)
 				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove) != 0 {
-					if err := s.reloadConfig(); err != nil {
-						log.Printf("Error reloading config: %v", err)
-					}
 					// Re-add watch in case file was removed/recreated (atomic write)
 					if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-						time.Sleep(100 * time.Millisecond) // Wait for file recreation
-						watcher.Remove(s.configFile)       // Remove old watch
+						time.Sleep(50 * time.Millisecond) // Brief wait for file recreation
+						watcher.Remove(s.configFile)      // Remove old watch
 						if err := watcher.Add(s.configFile); err != nil {
 							log.Printf("Failed to re-add watch: %v", err)
 						}
 					}
+
+					// Debounce: wait for writes to settle before reloading
+					debounceMu.Lock()
+					if debounceTimer != nil {
+						debounceTimer.Stop()
+					}
+					debounceTimer = time.AfterFunc(200*time.Millisecond, func() {
+						if err := s.reloadConfig(); err != nil {
+							log.Printf("Error reloading config: %v", err)
+						}
+					})
+					debounceMu.Unlock()
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
