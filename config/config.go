@@ -32,9 +32,10 @@ type ProxyAuth struct {
 }
 
 type Rule struct {
-	Match string `yaml:"match"` // domain, default
-	Value string `yaml:"value,omitempty"`
-	Proxy string `yaml:"proxy"`
+	Match  string   `yaml:"match"` // domain, default
+	Value  string   `yaml:"value,omitempty"`
+	Values []string `yaml:"values,omitempty"`
+	Proxy  string   `yaml:"proxy"`
 }
 
 func Load(filename string) (*Config, error) {
@@ -117,8 +118,15 @@ func (c *Config) Validate() error {
 		// Validate match type
 		switch rule.Match {
 		case "domain", "ip":
-			if rule.Value == "" {
-				return fmt.Errorf("rule[%d]: value is required for match type %s", i, rule.Match)
+			// Check that either value or values is provided, but not both
+			hasValue := rule.Value != ""
+			hasValues := len(rule.Values) > 0
+
+			if !hasValue && !hasValues {
+				return fmt.Errorf("rule[%d]: either value or values is required for match type %s", i, rule.Match)
+			}
+			if hasValue && hasValues {
+				return fmt.Errorf("rule[%d]: cannot specify both value and values, use one or the other", i)
 			}
 			if rule.Proxy == "" {
 				return fmt.Errorf("rule[%d]: proxy is required", i)

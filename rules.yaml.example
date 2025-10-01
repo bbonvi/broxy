@@ -25,7 +25,9 @@ rules:
     proxy: proxy_google
 
   - match: domain
-    value: ".reddit.com"
+    values:
+      - ".reddit.com"
+      - ".redd.it"
     proxy: proxy_reddit
 
   - match: default

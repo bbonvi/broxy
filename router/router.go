@@ -40,31 +40,47 @@ func (r *Router) Route(host string) *config.ProxyConfig {
 		case "ip":
 			// Handle IP/CIDR matching
 			if ip != nil {
-				// Check if it's a CIDR range
-				if strings.Contains(rule.Value, "/") {
-					_, ipNet, err := net.ParseCIDR(rule.Value)
-					if err == nil && ipNet.Contains(ip) {
-						return r.proxies[rule.Proxy]
-					}
-				} else {
-					// Exact IP match
-					ruleIP := net.ParseIP(rule.Value)
-					if ruleIP != nil && ruleIP.Equal(ip) {
-						return r.proxies[rule.Proxy]
+				// Get values to check (either single value or multiple values)
+				valuesToCheck := rule.Values
+				if len(valuesToCheck) == 0 && rule.Value != "" {
+					valuesToCheck = []string{rule.Value}
+				}
+
+				for _, val := range valuesToCheck {
+					// Check if it's a CIDR range
+					if strings.Contains(val, "/") {
+						_, ipNet, err := net.ParseCIDR(val)
+						if err == nil && ipNet.Contains(ip) {
+							return r.proxies[rule.Proxy]
+						}
+					} else {
+						// Exact IP match
+						ruleIP := net.ParseIP(val)
+						if ruleIP != nil && ruleIP.Equal(ip) {
+							return r.proxies[rule.Proxy]
+						}
 					}
 				}
 			}
 		case "domain":
 			// Only match domains, not IPs
 			if ip == nil {
-				if strings.HasSuffix(domain, rule.Value) {
-					return r.proxies[rule.Proxy]
+				// Get values to check (either single value or multiple values)
+				valuesToCheck := rule.Values
+				if len(valuesToCheck) == 0 && rule.Value != "" {
+					valuesToCheck = []string{rule.Value}
 				}
-				// If rule starts with ".", also match the bare domain
-				if strings.HasPrefix(rule.Value, ".") {
-					bareDomain := rule.Value[1:] // Remove leading dot
-					if domain == bareDomain {
+
+				for _, val := range valuesToCheck {
+					if strings.HasSuffix(domain, val) {
 						return r.proxies[rule.Proxy]
+					}
+					// If rule starts with ".", also match the bare domain
+					if strings.HasPrefix(val, ".") {
+						bareDomain := val[1:] // Remove leading dot
+						if domain == bareDomain {
+							return r.proxies[rule.Proxy]
+						}
 					}
 				}
 			}
