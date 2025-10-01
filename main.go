@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 
 	"broxy/config"
-	"broxy/install"
 	"broxy/router"
 	"broxy/server"
 )
@@ -31,14 +30,6 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		runProxy()
-	case "install":
-		if err := install.Install(); err != nil {
-			log.Fatalf("Installation failed: %v", err)
-		}
-	case "uninstall":
-		if err := install.Uninstall(); err != nil {
-			log.Fatalf("Uninstallation failed: %v", err)
-		}
 	case "help", "-h", "--help":
 		printHelp()
 	case "version", "-v", "--version":
@@ -78,15 +69,12 @@ func printHelp() {
 	fmt.Println("  broxy [command]")
 	fmt.Println("\nCommands:")
 	fmt.Println("  run         Run the proxy server")
-	fmt.Println("  install     Install broxy as a system service")
-	fmt.Println("  uninstall   Uninstall broxy system service")
 	fmt.Println("  help        Show this help message")
 	fmt.Println("  version     Show version information")
 	fmt.Println("\nRun Flags:")
 	fmt.Println("  -config string")
 	fmt.Printf("        Path to configuration file (default: %s)\n", getDefaultConfigPath())
 	fmt.Println("\nExamples:")
-	fmt.Println("  broxy install                        # Install as system service")
 	fmt.Println("  broxy run                            # Run with default config")
 	fmt.Println("  broxy run -config /path/to/rules.yaml  # Run with custom config")
 }
