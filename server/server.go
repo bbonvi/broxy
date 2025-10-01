@@ -12,23 +12,58 @@ import (
 	"broxy/config"
 	"broxy/proxy"
 	"broxy/router"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 type Server struct {
-	router     *router.Router
-	listen     string
-	port       int
-	transports map[string]*http.Transport
-	mu         sync.RWMutex
+	router         *router.Router
+	routerMu       sync.RWMutex
+	listen         string
+	port           int
+	configFile     string
+	transports     map[string]*http.Transport
+	transportMu    sync.RWMutex
 }
 
-func New(r *router.Router, listen string, port int) *Server {
+func New(r *router.Router, listen string, port int, configFile string) *Server {
 	return &Server{
 		router:     r,
 		listen:     listen,
 		port:       port,
+		configFile: configFile,
 		transports: make(map[string]*http.Transport),
 	}
+}
+
+func (s *Server) reloadConfig() error {
+	log.Printf("Reloading config from %s", s.configFile)
+
+	cfg, err := config.Load(s.configFile)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	newRouter := router.New(cfg)
+
+	// Update router with write lock
+	s.routerMu.Lock()
+	s.router = newRouter
+	s.routerMu.Unlock()
+
+	// Clear transport cache (proxy configs might have changed)
+	s.transportMu.Lock()
+	s.transports = make(map[string]*http.Transport)
+	s.transportMu.Unlock()
+
+	log.Printf("Config reloaded successfully")
+	return nil
+}
+
+func (s *Server) getRouter() *router.Router {
+	s.routerMu.RLock()
+	defer s.routerMu.RUnlock()
+	return s.router
 }
 
 func (s *Server) getOrCreateTransport(proxyConfig *config.ProxyConfig) (*http.Transport, error) {
@@ -39,16 +74,16 @@ func (s *Server) getOrCreateTransport(proxyConfig *config.ProxyConfig) (*http.Tr
 	}
 
 	// Try read lock first
-	s.mu.RLock()
+	s.transportMu.RLock()
 	transport, exists := s.transports[cacheKey]
-	s.mu.RUnlock()
+	s.transportMu.RUnlock()
 	if exists {
 		return transport, nil
 	}
 
 	// Need to create new transport
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.transportMu.Lock()
+	defer s.transportMu.Unlock()
 
 	// Double-check after acquiring write lock
 	if transport, exists := s.transports[cacheKey]; exists {
@@ -98,6 +133,49 @@ func (s *Server) Start() error {
 	addr := fmt.Sprintf("%s:%d", s.listen, s.port)
 	log.Printf("Starting proxy server on %s", addr)
 
+	// Set up file watcher
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("failed to create file watcher: %w", err)
+	}
+	defer watcher.Close()
+
+	err = watcher.Add(s.configFile)
+	if err != nil {
+		return fmt.Errorf("failed to watch config file: %w", err)
+	}
+
+	// Start goroutine to handle file changes
+	go func() {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				// Handle Write, Create, Remove events (editors often do atomic writes)
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove) != 0 {
+					if err := s.reloadConfig(); err != nil {
+						log.Printf("Error reloading config: %v", err)
+					}
+					// Re-add watch in case file was removed/recreated (atomic write)
+					if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+						time.Sleep(100 * time.Millisecond) // Wait for file recreation
+						watcher.Remove(s.configFile)       // Remove old watch
+						if err := watcher.Add(s.configFile); err != nil {
+							log.Printf("Failed to re-add watch: %v", err)
+						}
+					}
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Printf("File watcher error: %v", err)
+			}
+		}
+	}()
+
 	server := &http.Server{
 		Addr:    addr,
 		Handler: http.HandlerFunc(s.handleRequest),
@@ -116,7 +194,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Find the appropriate proxy for this host
-	proxyConfig := s.router.Route(r.Host)
+	proxyConfig := s.getRouter().Route(r.Host)
 	if proxyConfig == nil {
 		http.Error(w, "No proxy configured", http.StatusBadGateway)
 		return
@@ -155,7 +233,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Find the appropriate proxy for this host
-	proxyConfig := s.router.Route(r.Host)
+	proxyConfig := s.getRouter().Route(r.Host)
 	if proxyConfig == nil {
 		http.Error(w, "No proxy configured", http.StatusBadGateway)
 		return
