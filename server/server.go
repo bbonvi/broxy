@@ -6,23 +6,92 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
+	"time"
 
+	"broxy/config"
 	"broxy/proxy"
 	"broxy/router"
 )
 
 type Server struct {
-	router *router.Router
-	listen string
-	port   int
+	router     *router.Router
+	listen     string
+	port       int
+	transports map[string]*http.Transport
+	mu         sync.RWMutex
 }
 
 func New(r *router.Router, listen string, port int) *Server {
 	return &Server{
-		router: r,
-		listen: listen,
-		port:   port,
+		router:     r,
+		listen:     listen,
+		port:       port,
+		transports: make(map[string]*http.Transport),
 	}
+}
+
+func (s *Server) getOrCreateTransport(proxyConfig *config.ProxyConfig) (*http.Transport, error) {
+	// Create cache key from proxy config
+	cacheKey := fmt.Sprintf("%s:%s:%d", proxyConfig.Type, proxyConfig.Host, proxyConfig.Port)
+	if proxyConfig.Auth != nil {
+		cacheKey += ":" + proxyConfig.Auth.Username
+	}
+
+	// Try read lock first
+	s.mu.RLock()
+	transport, exists := s.transports[cacheKey]
+	s.mu.RUnlock()
+	if exists {
+		return transport, nil
+	}
+
+	// Need to create new transport
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if transport, exists := s.transports[cacheKey]; exists {
+		return transport, nil
+	}
+
+	// Create new transport based on proxy type
+	var newTransport *http.Transport
+
+	switch proxyConfig.Type {
+	case "direct":
+		newTransport = &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		}
+	case "http":
+		var proxyURL string
+		if proxyConfig.Auth != nil {
+			proxyURL = fmt.Sprintf("http://%s:%s@%s:%d",
+				url.QueryEscape(proxyConfig.Auth.Username),
+				url.QueryEscape(proxyConfig.Auth.Password),
+				proxyConfig.Host,
+				proxyConfig.Port)
+		} else {
+			proxyURL = fmt.Sprintf("http://%s:%d", proxyConfig.Host, proxyConfig.Port)
+		}
+		proxyURLParsed, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, err
+		}
+		newTransport = &http.Transport{
+			Proxy:               http.ProxyURL(proxyURLParsed),
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		}
+	default:
+		return nil, fmt.Errorf("unsupported proxy type for HTTP: %s", proxyConfig.Type)
+	}
+
+	s.transports[cacheKey] = newTransport
+	return newTransport, nil
 }
 
 func (s *Server) Start() error {
@@ -46,8 +115,6 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
-	log.Printf("CONNECT %s", r.Host)
-
 	// Find the appropriate proxy for this host
 	proxyConfig := s.router.Route(r.Host)
 	if proxyConfig == nil {
@@ -87,8 +154,6 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Printf("%s %s", r.Method, r.URL.String())
-
 	// Find the appropriate proxy for this host
 	proxyConfig := s.router.Route(r.Host)
 	if proxyConfig == nil {
@@ -96,44 +161,16 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create HTTP client with appropriate transport
-	var transport *http.Transport
-
-	switch proxyConfig.Type {
-	case "direct":
-		transport = &http.Transport{}
-	case "http":
-		var proxyURL string
-		if proxyConfig.Auth != nil {
-			proxyURL = fmt.Sprintf("http://%s:%s@%s:%d",
-				url.QueryEscape(proxyConfig.Auth.Username),
-				url.QueryEscape(proxyConfig.Auth.Password),
-				proxyConfig.Host,
-				proxyConfig.Port)
-		} else {
-			proxyURL = fmt.Sprintf("http://%s:%d", proxyConfig.Host, proxyConfig.Port)
-		}
-		proxyURLParsed, err := url.Parse(proxyURL)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		transport = &http.Transport{
-			Proxy: http.ProxyURL(proxyURLParsed),
-		}
-	case "socks5":
-		// SOCKS5 for HTTP requests requires special handling
-		dialer, err := proxy.Dial(proxyConfig, "tcp", r.Host)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		defer dialer.Close()
-		// For SOCKS5, we need to use a custom dialer
+	// Handle SOCKS5 separately (not supported for plain HTTP)
+	if proxyConfig.Type == "socks5" {
 		http.Error(w, "SOCKS5 for plain HTTP not fully supported, use HTTPS", http.StatusNotImplemented)
 		return
-	default:
-		http.Error(w, "Unsupported proxy type", http.StatusBadGateway)
+	}
+
+	// Get or create cached transport
+	transport, err := s.getOrCreateTransport(proxyConfig)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
