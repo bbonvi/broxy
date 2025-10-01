@@ -118,21 +118,37 @@ func uninstallMacOSService() error {
 	}
 
 	plistPath := filepath.Join(home, "Library", "LaunchAgents", fmt.Sprintf("com.%s.plist", binaryName))
+	serviceName := fmt.Sprintf("com.%s", binaryName)
 
 	// Check if plist exists
+	plistExists := true
 	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
-		fmt.Printf("Service file not found at %s, skipping\n", plistPath)
-		return nil
+		fmt.Printf("Service file not found at %s\n", plistPath)
+		plistExists = false
 	}
 
-	// Unload service
-	if err := exec.Command("launchctl", "unload", plistPath).Run(); err != nil {
-		fmt.Printf("Warning: failed to unload service: %v\n", err)
+	// Try to kill the service first
+	exec.Command("launchctl", "kill", "SIGTERM", fmt.Sprintf("gui/%s/%s", os.Getenv("UID"), serviceName)).Run()
+
+	// Bootout (modern macOS way to unload)
+	if err := exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%s", os.Getenv("UID")), plistPath).Run(); err != nil {
+		// Try legacy unload if bootout fails
+		if err := exec.Command("launchctl", "unload", plistPath).Run(); err != nil {
+			fmt.Printf("Warning: failed to unload service: %v\n", err)
+		}
 	}
 
-	// Remove plist file
-	if err := os.Remove(plistPath); err != nil {
-		return fmt.Errorf("failed to remove plist file: %w", err)
+	// Remove from launchd database
+	exec.Command("launchctl", "remove", serviceName).Run()
+
+	// Kill any remaining processes
+	exec.Command("pkill", "-9", binaryName).Run()
+
+	// Remove plist file if it exists
+	if plistExists {
+		if err := os.Remove(plistPath); err != nil {
+			return fmt.Errorf("failed to remove plist file: %w", err)
+		}
 	}
 
 	fmt.Printf("✓ Removed launchd service\n")

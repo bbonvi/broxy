@@ -156,12 +156,11 @@ func (s *Server) Start() error {
 				if !ok {
 					return
 				}
-				// Handle Write, Create, Remove events (editors often do atomic writes)
-				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove) != 0 {
+				// Handle Write, Create, Remove, Rename events (editors often do atomic writes)
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
 					// Re-add watch in case file was removed/recreated (atomic write)
 					if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-						time.Sleep(50 * time.Millisecond) // Brief wait for file recreation
-						watcher.Remove(s.configFile)      // Remove old watch
+						time.Sleep(100 * time.Millisecond) // Wait for file recreation
 						if err := watcher.Add(s.configFile); err != nil {
 							log.Printf("Failed to re-add watch: %v", err)
 						}
