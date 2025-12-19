@@ -248,6 +248,15 @@ func closeWrite(conn net.Conn) {
 	}
 }
 
+// tuneTCPConn applies TCP optimizations to the connection
+func tuneTCPConn(conn net.Conn) {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
+}
+
 // isExpectedCloseError returns true for normal close/timeout errors
 func isExpectedCloseError(err error) bool {
 	if err == nil {
@@ -300,6 +309,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clientConn.Close()
+
+	// Apply TCP optimizations to both connections
+	tuneTCPConn(clientConn)
+	tuneTCPConn(destConn)
 
 	// Send 200 Connection established
 	clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
