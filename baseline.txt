@@ -1,0 +1,57 @@
+# Baseline Performance Metrics
+# Generated: 2025-12-19 14:32
+# Platform: aarch64 Linux
+# Go version: go1.25.5
+
+## Benchmark Results (count=5)
+
+goos: linux
+goarch: arm64
+pkg: broxy/server
+BenchmarkCopyConn/size=1024-10         	  279848	      4399 ns/op	 232.76 MB/s	   34080 B/op	       8 allocs/op
+BenchmarkCopyConn/size=1024-10         	  271318	      5294 ns/op	 193.42 MB/s	   34080 B/op	       8 allocs/op
+BenchmarkCopyConn/size=1024-10         	  269781	      4517 ns/op	 226.70 MB/s	   34080 B/op	       8 allocs/op
+BenchmarkCopyConn/size=1024-10         	  299204	      4615 ns/op	 221.89 MB/s	   34080 B/op	       8 allocs/op
+BenchmarkCopyConn/size=1024-10         	  254640	      4579 ns/op	 223.63 MB/s	   34080 B/op	       8 allocs/op
+BenchmarkCopyConn/size=32768-10        	  130972	      9976 ns/op	3284.67 MB/s	   65824 B/op	       8 allocs/op
+BenchmarkCopyConn/size=32768-10        	  120536	      9332 ns/op	3511.33 MB/s	   65824 B/op	       8 allocs/op
+BenchmarkCopyConn/size=32768-10        	  133498	     10039 ns/op	3263.92 MB/s	   65824 B/op	       8 allocs/op
+BenchmarkCopyConn/size=32768-10        	  126178	     10089 ns/op	3247.73 MB/s	   65824 B/op	       8 allocs/op
+BenchmarkCopyConn/size=32768-10        	   85237	     18294 ns/op	1791.15 MB/s	   65824 B/op	       8 allocs/op
+BenchmarkCopyConn/size=262144-10       	   14703	     84991 ns/op	3084.38 MB/s	  524576 B/op	      11 allocs/op
+BenchmarkCopyConn/size=262144-10       	   14246	    127143 ns/op	2061.80 MB/s	  524576 B/op	      11 allocs/op
+BenchmarkCopyConn/size=262144-10       	   10000	    115931 ns/op	2261.20 MB/s	  524576 B/op	      11 allocs/op
+BenchmarkCopyConn/size=262144-10       	   15496	     81652 ns/op	3210.51 MB/s	  524576 B/op	      11 allocs/op
+BenchmarkCopyConn/size=262144-10       	   13429	     78600 ns/op	3335.18 MB/s	  524576 B/op	      11 allocs/op
+BenchmarkCopyConn/size=1048576-10      	    4677	    485625 ns/op	2159.23 MB/s	 2097443 B/op	      13 allocs/op
+BenchmarkCopyConn/size=1048576-10      	    2276	    452070 ns/op	2319.50 MB/s	 2097442 B/op	      13 allocs/op
+BenchmarkCopyConn/size=1048576-10      	    3124	    363740 ns/op	2882.77 MB/s	 2097443 B/op	      13 allocs/op
+BenchmarkCopyConn/size=1048576-10      	    3513	    366591 ns/op	2860.34 MB/s	 2097442 B/op	      13 allocs/op
+BenchmarkCopyConn/size=1048576-10      	    3710	    417570 ns/op	2511.14 MB/s	 2097443 B/op	      13 allocs/op
+BenchmarkHandleConnect_Direct-10       	    6940	    156027 ns/op	 196.89 MB/s	  100942 B/op	     100 allocs/op
+BenchmarkHandleConnect_Direct-10       	    8497	    152341 ns/op	 201.65 MB/s	  100949 B/op	     100 allocs/op
+BenchmarkHandleConnect_Direct-10       	    8403	    159490 ns/op	 192.61 MB/s	  100942 B/op	     100 allocs/op
+BenchmarkHandleConnect_Direct-10       	    7944	    179947 ns/op	 170.72 MB/s	  100964 B/op	     100 allocs/op
+BenchmarkHandleConnect_Direct-10       	    7567	    230426 ns/op	 133.32 MB/s	  100986 B/op	     100 allocs/op
+BenchmarkHandleConnect_HTTPProxy-10    	    2563	    574018 ns/op	  53.52 MB/s	  119435 B/op	     177 allocs/op
+BenchmarkHandleConnect_HTTPProxy-10    	    2877	    372818 ns/op	  82.40 MB/s	  119452 B/op	     177 allocs/op
+BenchmarkHandleConnect_HTTPProxy-10    	    3553	    384519 ns/op	  79.89 MB/s	  119537 B/op	     177 allocs/op
+BenchmarkHandleConnect_HTTPProxy-10    	    3957	    538359 ns/op	  57.06 MB/s	  119577 B/op	     177 allocs/op
+BenchmarkHandleConnect_HTTPProxy-10    	    1710	    743898 ns/op	  41.30 MB/s	  119807 B/op	     177 allocs/op
+BenchmarkDial_Direct-10                	   61123	     37060 ns/op	    1004 B/op	      21 allocs/op
+BenchmarkDial_Direct-10                	   55660	     26010 ns/op	    1004 B/op	      21 allocs/op
+BenchmarkDial_Direct-10                	   37990	     29939 ns/op	    1004 B/op	      22 allocs/op
+BenchmarkDial_Direct-10                	   10000	    123974 ns/op	    1007 B/op	      21 allocs/op
+BenchmarkDial_Direct-10                	   47463	     25977 ns/op	    1004 B/op	      22 allocs/op
+BenchmarkDial_HTTPProxy-10             	    4298	    339994 ns/op	   27183 B/op	      96 allocs/op
+BenchmarkDial_HTTPProxy-10             	    6459	    537020 ns/op	   27375 B/op	      97 allocs/op
+BenchmarkDial_HTTPProxy-10             	    6196	    407772 ns/op	   27228 B/op	      97 allocs/op
+BenchmarkDial_HTTPProxy-10             	    2362	    556359 ns/op	   27868 B/op	      97 allocs/op
+BenchmarkDial_HTTPProxy-10             	    7377	    616846 ns/op	   27227 B/op	      97 allocs/op
+BenchmarkHandleHTTP_Direct-10          	   20774	     62183 ns/op	   11416 B/op	     140 allocs/op
+BenchmarkHandleHTTP_Direct-10          	   27805	     45081 ns/op	   11418 B/op	     140 allocs/op
+BenchmarkHandleHTTP_Direct-10          	   15531	     87308 ns/op	   11464 B/op	     140 allocs/op
+BenchmarkHandleHTTP_Direct-10          	   11082	    102444 ns/op	   11455 B/op	     140 allocs/op
+BenchmarkHandleHTTP_Direct-10          	   30487	     43780 ns/op	   11409 B/op	     140 allocs/op
+PASS
+ok  	broxy/server	117.399s
