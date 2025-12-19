@@ -7,10 +7,12 @@ A simple proxy forwarder written in Go. Routes requests through different upstre
 - Local HTTP proxy server
 - Route requests based on domain matching
 - Support for multiple upstream proxy types:
-  - HTTP proxies
+  - HTTP proxies (with connection pooling)
   - SOCKS5 proxies (with authentication)
   - Direct connections
 - YAML-based configuration
+- Live config reloading
+- Connection pooling for upstream HTTP proxies
 
 ## Installation
 
@@ -136,6 +138,22 @@ launchctl unload ~/Library/LaunchAgents/com.broxy.plist
   - For `domain` rules: Domain suffix (e.g., `.google.com` matches `google.com` and `www.google.com`)
   - For `ip` rules: Exact IP (e.g., `1.2.3.4`) or CIDR range (e.g., `192.168.0.0/16`)
 - `proxy`: Name of the proxy to use
+
+### Pool (optional)
+Connection pooling for upstream HTTP proxies. Reuses TCP connections to reduce latency.
+
+- `max_idle_per_host`: Max idle connections per upstream proxy (default: 10)
+- `max_idle_total`: Max total idle connections (default: 100)
+- `idle_timeout`: How long idle connections live (default: 90s)
+
+```yaml
+pool:
+  max_idle_per_host: 10
+  max_idle_total: 100
+  idle_timeout: 90s
+```
+
+Pool configuration is read at startup only; changes require restart.
 
 ## How It Works
 
