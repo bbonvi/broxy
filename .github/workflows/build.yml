@@ -10,8 +10,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     strategy:
       matrix:
         goos: [linux, darwin]
@@ -39,8 +37,19 @@ jobs:
           name: broxy-${{ matrix.goos }}-${{ matrix.goarch }}
           path: broxy-${{ matrix.goos }}-${{ matrix.goarch }}
 
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
       - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: broxy-${{ matrix.goos }}-${{ matrix.goarch }}
+          files: artifacts/**/*
