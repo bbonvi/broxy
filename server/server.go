@@ -56,6 +56,9 @@ func (s *Server) reloadConfig() error {
 
 	// Clear transport cache (proxy configs might have changed)
 	s.transportMu.Lock()
+	for _, t := range s.transports {
+		t.CloseIdleConnections()
+	}
 	s.transports = make(map[string]*http.Transport)
 	s.transportMu.Unlock()
 
