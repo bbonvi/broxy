@@ -107,3 +107,56 @@ BenchmarkHandleHTTP_Direct-10          	   26320	     62362 ns/op	   11416 B/op	
 BenchmarkHandleHTTP_Direct-10          	   22941	     49427 ns/op	   11413 B/op	     140 allocs/op
 PASS
 ok  	broxy/server	62.037s
+
+---
+
+# Post-Pool Integration
+# Generated: 2025-12-19 15:35
+
+## Analysis
+
+Pool integration adds no measurable overhead. Performance remains at post-foundation levels:
+- CopyConn: ~550 ns/op for 1KB (same)
+- HandleConnect_Direct: ~118 μs (same)
+- HandleConnect_HTTPProxy: ~556 μs (same)
+- Allocation counts unchanged
+
+Note on pool reuse for CONNECT tunnels:
+- CONNECT tunnels cannot be returned to pool (connection becomes dedicated tunnel)
+- Pool benefits would show in real-world scenarios with concurrent requests to same proxy
+- Benchmark isolation prevents pool reuse (each iteration independent)
+
+## Benchmark Results (count=3)
+
+goos: linux
+goarch: arm64
+pkg: broxy/server
+BenchmarkCopyConn/size=1024-10         	 2492599	       506.5 ns/op	2021.52 MB/s	    1318 B/op	       7 allocs/op
+BenchmarkCopyConn/size=1024-10         	 2029868	       599.8 ns/op	1707.26 MB/s	    1318 B/op	       7 allocs/op
+BenchmarkCopyConn/size=1024-10         	 1915910	       573.3 ns/op	1786.23 MB/s	    1318 B/op	       7 allocs/op
+BenchmarkCopyConn/size=32768-10        	  180350	      6800 ns/op	4819.14 MB/s	   33091 B/op	       7 allocs/op
+BenchmarkCopyConn/size=32768-10        	  203502	      7122 ns/op	4601.21 MB/s	   33093 B/op	       7 allocs/op
+BenchmarkCopyConn/size=32768-10        	  182185	      6464 ns/op	5069.40 MB/s	   33094 B/op	       7 allocs/op
+BenchmarkCopyConn/size=262144-10       	   10000	    120250 ns/op	2180.00 MB/s	  492136 B/op	      10 allocs/op
+BenchmarkCopyConn/size=262144-10       	   10000	    105289 ns/op	2489.76 MB/s	  492192 B/op	      10 allocs/op
+BenchmarkCopyConn/size=262144-10       	   14671	     80839 ns/op	3242.80 MB/s	  492019 B/op	      10 allocs/op
+BenchmarkCopyConn/size=1048576-10      	    3163	    368683 ns/op	2844.11 MB/s	 2065376 B/op	      12 allocs/op
+BenchmarkCopyConn/size=1048576-10      	    4322	    510084 ns/op	2055.69 MB/s	 2065447 B/op	      12 allocs/op
+BenchmarkCopyConn/size=1048576-10      	    3057	    348319 ns/op	3010.39 MB/s	 2065345 B/op	      12 allocs/op
+BenchmarkHandleConnect_Direct-10       	   10798	    112720 ns/op	 272.53 MB/s	   38755 B/op	     105 allocs/op
+BenchmarkHandleConnect_Direct-10       	   10000	    117349 ns/op	 261.78 MB/s	   38898 B/op	     105 allocs/op
+BenchmarkHandleConnect_Direct-10       	    9154	    123583 ns/op	 248.58 MB/s	   38943 B/op	     105 allocs/op
+BenchmarkHandleConnect_HTTPProxy-10    	    5786	    565776 ns/op	  54.30 MB/s	   87623 B/op	     185 allocs/op
+BenchmarkHandleConnect_HTTPProxy-10    	    4815	    448593 ns/op	  68.48 MB/s	   87526 B/op	     185 allocs/op
+BenchmarkHandleConnect_HTTPProxy-10    	    4011	    653744 ns/op	  46.99 MB/s	   87480 B/op	     185 allocs/op
+BenchmarkDial_Direct-10                	   50659	     25373 ns/op	    1004 B/op	      22 allocs/op
+BenchmarkDial_Direct-10                	   50023	     23555 ns/op	    1004 B/op	      22 allocs/op
+BenchmarkDial_Direct-10                	   74056	     17841 ns/op	    1005 B/op	      22 allocs/op
+BenchmarkDial_HTTPProxy-10             	    5796	    402385 ns/op	   27347 B/op	      96 allocs/op
+BenchmarkDial_HTTPProxy-10             	    7503	    564188 ns/op	   27388 B/op	      97 allocs/op
+BenchmarkDial_HTTPProxy-10             	    6546	    561093 ns/op	   27227 B/op	      97 allocs/op
+BenchmarkHandleHTTP_Direct-10          	   20674	     54543 ns/op	   11420 B/op	     140 allocs/op
+BenchmarkHandleHTTP_Direct-10          	   26205	     59997 ns/op	   11420 B/op	     140 allocs/op
+BenchmarkHandleHTTP_Direct-10          	   24963	     44581 ns/op	   11416 B/op	     140 allocs/op
+PASS
+ok  	broxy/server	66.765s
