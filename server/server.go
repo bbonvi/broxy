@@ -1,11 +1,14 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -195,6 +198,56 @@ func (s *Server) Start() error {
 	return server.ListenAndServe()
 }
 
+const defaultIdleTimeout = 60 * time.Second
+
+// copyConn copies data with idle timeout reset per operation
+func copyConn(dst, src net.Conn, idleTimeout time.Duration) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var written int64
+	for {
+		src.SetReadDeadline(time.Now().Add(idleTimeout))
+		nr, rerr := src.Read(buf)
+		if nr > 0 {
+			dst.SetWriteDeadline(time.Now().Add(idleTimeout))
+			nw, werr := dst.Write(buf[:nr])
+			written += int64(nw)
+			if werr != nil {
+				return written, werr
+			}
+			if nw != nr {
+				return written, io.ErrShortWrite
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return written, nil
+			}
+			return written, rerr
+		}
+	}
+}
+
+// closeWrite sends TCP FIN if supported
+func closeWrite(conn net.Conn) {
+	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	}
+}
+
+// isExpectedCloseError returns true for normal close/timeout errors
+func isExpectedCloseError(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		return true
+	}
+	return strings.Contains(err.Error(), "closed")
+}
+
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		s.handleConnect(w, r)
@@ -237,9 +290,29 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Send 200 Connection established
 	clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 
-	// Bidirectional copy
-	go io.Copy(destConn, clientConn)
-	io.Copy(clientConn, destConn)
+	// Bidirectional copy with proper synchronization
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		_, err := copyConn(destConn, clientConn, defaultIdleTimeout)
+		if !isExpectedCloseError(err) {
+			log.Printf("Copy client->dest error for %s: %v", r.Host, err)
+		}
+		closeWrite(destConn)
+	}()
+
+	go func() {
+		defer wg.Done()
+		_, err := copyConn(clientConn, destConn, defaultIdleTimeout)
+		if !isExpectedCloseError(err) {
+			log.Printf("Copy dest->client error for %s: %v", r.Host, err)
+		}
+		closeWrite(clientConn)
+	}()
+
+	wg.Wait()
 }
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
