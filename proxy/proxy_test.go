@@ -116,3 +116,113 @@ func TestDialHTTP_ProxyRefuses(t *testing.T) {
 		t.Fatal("expected error when proxy refuses")
 	}
 }
+
+func TestDialWithPool_Direct(t *testing.T) {
+	// Start a TCP server
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start listener: %v", err)
+	}
+	defer listener.Close()
+
+	go func() {
+		conn, _ := listener.Accept()
+		if conn != nil {
+			conn.Close()
+		}
+	}()
+
+	cfg := &config.ProxyConfig{Type: "direct"}
+	pool := NewPool(DefaultPoolConfig())
+	defer pool.Close()
+
+	conn, err := DialWithPool(cfg, "tcp", listener.Addr().String(), pool)
+	if err != nil {
+		t.Fatalf("DialWithPool failed: %v", err)
+	}
+	conn.Close()
+}
+
+func TestDialWithPool_NilPool(t *testing.T) {
+	// Start a mock HTTP proxy
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start listener: %v", err)
+	}
+	defer listener.Close()
+
+	host, portStr, _ := net.SplitHostPort(listener.Addr().String())
+	var port int
+	for i := 0; i < len(portStr); i++ {
+		port = port*10 + int(portStr[i]-'0')
+	}
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 1024)
+		conn.Read(buf)
+		conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+	}()
+
+	cfg := &config.ProxyConfig{
+		Type: "http",
+		Host: host,
+		Port: port,
+	}
+
+	// nil pool should work (falls back to direct dial)
+	conn, err := DialWithPool(cfg, "tcp", "example.com:443", nil)
+	if err != nil {
+		t.Fatalf("DialWithPool with nil pool failed: %v", err)
+	}
+	conn.Close()
+}
+
+func TestDialWithPool_HTTPProxy(t *testing.T) {
+	// Start a mock HTTP proxy that tracks connections
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start listener: %v", err)
+	}
+	defer listener.Close()
+
+	host, portStr, _ := net.SplitHostPort(listener.Addr().String())
+	var port int
+	for i := 0; i < len(portStr); i++ {
+		port = port*10 + int(portStr[i]-'0')
+	}
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 1024)
+				c.Read(buf)
+				c.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+			}(conn)
+		}
+	}()
+
+	cfg := &config.ProxyConfig{
+		Type: "http",
+		Host: host,
+		Port: port,
+	}
+
+	pool := NewPool(DefaultPoolConfig())
+	defer pool.Close()
+
+	conn, err := DialWithPool(cfg, "tcp", "example.com:443", pool)
+	if err != nil {
+		t.Fatalf("DialWithPool failed: %v", err)
+	}
+	conn.Close()
+}
