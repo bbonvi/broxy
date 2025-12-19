@@ -38,15 +38,30 @@ type Server struct {
 	connPool       *proxy.Pool
 }
 
-func New(r *router.Router, listen string, port int, configFile string) *Server {
+func New(r *router.Router, cfg *config.Config, configFile string) *Server {
 	return &Server{
 		router:     r,
-		listen:     listen,
-		port:       port,
+		listen:     cfg.Server.Listen,
+		port:       cfg.Server.Port,
 		configFile: configFile,
 		transports: make(map[string]*http.Transport),
-		connPool:   proxy.NewPool(proxy.DefaultPoolConfig()),
+		connPool:   proxy.NewPool(toPoolConfig(&cfg.Pool)),
 	}
+}
+
+// toPoolConfig converts config.PoolConfig to proxy.PoolConfig with defaults
+func toPoolConfig(cfg *config.PoolConfig) proxy.PoolConfig {
+	pc := proxy.DefaultPoolConfig()
+	if cfg.MaxIdlePerHost > 0 {
+		pc.MaxIdlePerHost = cfg.MaxIdlePerHost
+	}
+	if cfg.MaxIdleTotal > 0 {
+		pc.MaxIdleTotal = cfg.MaxIdleTotal
+	}
+	if idleTimeout, err := cfg.ParseIdleTimeout(); err == nil && idleTimeout > 0 {
+		pc.IdleTimeout = idleTimeout
+	}
+	return pc
 }
 
 func (s *Server) reloadConfig() error {

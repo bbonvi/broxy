@@ -3,14 +3,31 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
 	Server  ServerConfig  `yaml:"server"`
+	Pool    PoolConfig    `yaml:"pool,omitempty"`
 	Proxies []ProxyConfig `yaml:"proxies"`
 	Rules   []Rule        `yaml:"rules"`
+}
+
+type PoolConfig struct {
+	MaxIdlePerHost int    `yaml:"max_idle_per_host,omitempty"`
+	MaxIdleTotal   int    `yaml:"max_idle_total,omitempty"`
+	IdleTimeout    string `yaml:"idle_timeout,omitempty"`
+}
+
+// ParseIdleTimeout parses the IdleTimeout string as a duration.
+// Returns 0 if empty (caller should apply defaults).
+func (p *PoolConfig) ParseIdleTimeout() (time.Duration, error) {
+	if p.IdleTimeout == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(p.IdleTimeout)
 }
 
 type ServerConfig struct {
@@ -63,6 +80,19 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.Port == 0 {
 		return fmt.Errorf("server.port is required")
+	}
+
+	// Validate pool config (all fields optional, just validate format)
+	if c.Pool.MaxIdlePerHost < 0 {
+		return fmt.Errorf("pool.max_idle_per_host must be >= 0")
+	}
+	if c.Pool.MaxIdleTotal < 0 {
+		return fmt.Errorf("pool.max_idle_total must be >= 0")
+	}
+	if c.Pool.IdleTimeout != "" {
+		if _, err := c.Pool.ParseIdleTimeout(); err != nil {
+			return fmt.Errorf("pool.idle_timeout: %w", err)
+		}
 	}
 
 	// Build proxy name set for validation

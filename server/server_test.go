@@ -691,7 +691,7 @@ func TestServer_Close(t *testing.T) {
 		},
 	}
 	r := router.New(cfg)
-	s := New(r, "127.0.0.1", 0, "/dev/null")
+	s := New(r, cfg, "/dev/null")
 
 	// Verify pool was created
 	if s.connPool == nil {
@@ -703,6 +703,59 @@ func TestServer_Close(t *testing.T) {
 
 	// Double close should not panic
 	s.Close()
+}
+
+func TestToPoolConfig(t *testing.T) {
+	tests := []struct {
+		name           string
+		cfg            config.PoolConfig
+		wantPerHost    int
+		wantTotal      int
+		wantTimeoutGT0 bool
+	}{
+		{
+			name:           "empty uses defaults",
+			cfg:            config.PoolConfig{},
+			wantPerHost:    10,  // default
+			wantTotal:      100, // default
+			wantTimeoutGT0: true,
+		},
+		{
+			name: "custom values",
+			cfg: config.PoolConfig{
+				MaxIdlePerHost: 20,
+				MaxIdleTotal:   200,
+				IdleTimeout:    "2m",
+			},
+			wantPerHost:    20,
+			wantTotal:      200,
+			wantTimeoutGT0: true,
+		},
+		{
+			name: "partial override",
+			cfg: config.PoolConfig{
+				MaxIdlePerHost: 5,
+			},
+			wantPerHost:    5,
+			wantTotal:      100, // default
+			wantTimeoutGT0: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := toPoolConfig(&tt.cfg)
+			if got.MaxIdlePerHost != tt.wantPerHost {
+				t.Errorf("MaxIdlePerHost = %d, want %d", got.MaxIdlePerHost, tt.wantPerHost)
+			}
+			if got.MaxIdleTotal != tt.wantTotal {
+				t.Errorf("MaxIdleTotal = %d, want %d", got.MaxIdleTotal, tt.wantTotal)
+			}
+			if tt.wantTimeoutGT0 && got.IdleTimeout <= 0 {
+				t.Error("IdleTimeout should be > 0")
+			}
+		})
+	}
 }
 
 // =============================================================================
@@ -867,7 +920,10 @@ func testRouter(proxyConfig *config.ProxyConfig) *router.Router {
 // testServer creates a test Server with the given router
 func testServer(t testing.TB, r *router.Router) (*Server, string, func()) {
 	// Create server - we need a valid config file path but won't use file watching in tests
-	s := New(r, "127.0.0.1", 0, "/dev/null")
+	cfg := &config.Config{
+		Server: config.ServerConfig{Listen: "127.0.0.1", Port: 0},
+	}
+	s := New(r, cfg, "/dev/null")
 
 	// Start listener manually for testing
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

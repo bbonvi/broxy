@@ -57,7 +57,7 @@ func runProxy() {
 	r := router.New(cfg)
 
 	// Create and start server
-	srv := server.New(r, cfg.Server.Listen, cfg.Server.Port, *configFile)
+	srv := server.New(r, cfg, *configFile)
 	if err := srv.Start(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}

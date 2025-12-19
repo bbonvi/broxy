@@ -2,6 +2,12 @@ server:
   listen: 0.0.0.0
   port: 3128
 
+# Optional: Connection pool settings (defaults shown)
+# pool:
+#   max_idle_per_host: 10  # Max idle connections per upstream proxy
+#   max_idle_total: 100    # Max total idle connections
+#   idle_timeout: 90s      # How long idle connections live
+
 proxies:
   - name: proxy_google
     type: http
