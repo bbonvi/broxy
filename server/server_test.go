@@ -366,26 +366,35 @@ func TestHandleConnect_HalfClose(t *testing.T) {
 	// Send CONNECT request
 	clientConn.Write([]byte("CONNECT " + upstreamAddr + " HTTP/1.1\r\nHost: " + upstreamAddr + "\r\n\r\n"))
 
-	// Read response
+	// Read all data (may come in one or multiple reads)
 	buf := make([]byte, 1024)
-	n, err := clientConn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read proxy response: %v", err)
+	var received []byte
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	for {
+		n, err := clientConn.Read(buf)
+		if n > 0 {
+			received = append(received, buf[:n]...)
+		}
+		// Check if we have everything we need
+		response := string(received)
+		if strings.Contains(response, "200") && strings.Contains(response, "hello from upstream") {
+			break
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("failed to read: %v", err)
+		}
 	}
 
-	response := string(buf[:n])
+	response := string(received)
 	if !strings.Contains(response, "200") {
 		t.Fatalf("expected 200 response, got: %s", response)
 	}
-
-	// Read data from upstream
-	n, err = clientConn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read upstream data: %v", err)
-	}
-
-	if string(buf[:n]) != "hello from upstream" {
-		t.Errorf("unexpected data: %s", string(buf[:n]))
+	if !strings.Contains(response, "hello from upstream") {
+		t.Fatalf("expected upstream data, got: %s", response)
 	}
 
 	// Half-close client side
