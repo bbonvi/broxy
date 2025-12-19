@@ -1,15 +1,22 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"broxy/config"
+	"broxy/router"
 )
 
 // mockConn implements net.Conn for testing
@@ -569,5 +576,477 @@ func runTestConnection(t *testing.T, proxyAddr, upstreamAddr string) {
 
 	if !bytes.Equal(buf[:n], testData) {
 		t.Logf("echo mismatch: got %q, want %q", buf[:n], testData)
+	}
+}
+
+// =============================================================================
+// Benchmark Infrastructure
+// =============================================================================
+
+// echoServer starts a TCP echo server and returns its address and cleanup func
+func echoServer(t testing.TB) (string, func()) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start echo server: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			listener.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond))
+			conn, err := listener.Accept()
+			if err != nil {
+				continue
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				io.Copy(c, c)
+			}(conn)
+		}
+	}()
+
+	cleanup := func() {
+		close(done)
+		listener.Close()
+	}
+
+	return listener.Addr().String(), cleanup
+}
+
+// discardServer starts a TCP server that discards all input, returns addr and cleanup
+func discardServer(t testing.TB) (string, func()) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start discard server: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			listener.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond))
+			conn, err := listener.Accept()
+			if err != nil {
+				continue
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				io.Copy(io.Discard, c)
+			}(conn)
+		}
+	}()
+
+	cleanup := func() {
+		close(done)
+		listener.Close()
+	}
+
+	return listener.Addr().String(), cleanup
+}
+
+// mockHTTPProxy starts an HTTP CONNECT proxy that forwards to any host
+func mockHTTPProxy(t testing.TB) (string, func()) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start mock HTTP proxy: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			listener.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond))
+			conn, err := listener.Accept()
+			if err != nil {
+				continue
+			}
+			go handleMockProxyConn(conn)
+		}
+	}()
+
+	cleanup := func() {
+		close(done)
+		listener.Close()
+	}
+
+	return listener.Addr().String(), cleanup
+}
+
+func handleMockProxyConn(clientConn net.Conn) {
+	defer clientConn.Close()
+
+	reader := bufio.NewReader(clientConn)
+	req, err := http.ReadRequest(reader)
+	if err != nil {
+		return
+	}
+
+	if req.Method != "CONNECT" {
+		clientConn.Write([]byte("HTTP/1.1 405 Method Not Allowed\r\n\r\n"))
+		return
+	}
+
+	// Connect to the target
+	targetConn, err := net.DialTimeout("tcp", req.Host, 5*time.Second)
+	if err != nil {
+		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		return
+	}
+	defer targetConn.Close()
+
+	// Send 200 OK
+	clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+
+	// Bidirectional copy
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		io.Copy(targetConn, clientConn)
+	}()
+	go func() {
+		defer wg.Done()
+		io.Copy(clientConn, targetConn)
+	}()
+	wg.Wait()
+}
+
+// testRouter creates a router that routes all traffic through the given proxy config
+func testRouter(proxyConfig *config.ProxyConfig) *router.Router {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Listen: "127.0.0.1", Port: 3128},
+		Proxies: []config.ProxyConfig{
+			*proxyConfig,
+		},
+		Rules: []config.Rule{
+			{Match: "default", Proxy: proxyConfig.Name},
+		},
+	}
+	return router.New(cfg)
+}
+
+// testServer creates a test Server with the given router
+func testServer(t testing.TB, r *router.Router) (*Server, string, func()) {
+	// Create server - we need a valid config file path but won't use file watching in tests
+	s := New(r, "127.0.0.1", 0, "/dev/null")
+
+	// Start listener manually for testing
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start test server: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		httpServer := &http.Server{Handler: http.HandlerFunc(s.handleRequest)}
+		go httpServer.Serve(listener)
+		<-done
+		httpServer.Close()
+	}()
+
+	cleanup := func() {
+		close(done)
+		listener.Close()
+	}
+
+	return s, listener.Addr().String(), cleanup
+}
+
+// =============================================================================
+// Benchmarks
+// =============================================================================
+
+// BenchmarkCopyConn measures raw copy throughput (core of handleConnect)
+func BenchmarkCopyConn(b *testing.B) {
+	sizes := []int{1024, 32 * 1024, 256 * 1024, 1024 * 1024}
+	for _, size := range sizes {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			data := make([]byte, size)
+			for i := range data {
+				data[i] = byte(i % 256)
+			}
+
+			b.ReportAllocs()
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				src := newMockConn(data)
+				dst := newMockConn(nil)
+				copyConn(dst, src, 10*time.Second)
+			}
+		})
+	}
+}
+
+// BenchmarkHandleConnect_Direct measures end-to-end CONNECT with direct connection
+func BenchmarkHandleConnect_Direct(b *testing.B) {
+	// Start echo server as destination
+	destAddr, destCleanup := echoServer(b)
+	defer destCleanup()
+
+	// Create server with direct proxy
+	directProxy := &config.ProxyConfig{Name: "direct", Type: "direct"}
+	r := testRouter(directProxy)
+	_, serverAddr, serverCleanup := testServer(b, r)
+	defer serverCleanup()
+
+	// Test data
+	testData := bytes.Repeat([]byte("benchmark data "), 1024) // ~15KB
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(testData) * 2)) // round trip
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
+		if err != nil {
+			b.Fatalf("dial failed: %v", err)
+		}
+
+		// Send CONNECT
+		fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", destAddr, destAddr)
+
+		// Read response
+		reader := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			conn.Close()
+			b.Fatalf("failed to read CONNECT response: %v", err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			conn.Close()
+			b.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+
+		// Send test data
+		_, err = conn.Write(testData)
+		if err != nil {
+			conn.Close()
+			b.Fatalf("write failed: %v", err)
+		}
+
+		// Read echo back
+		received := make([]byte, len(testData))
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err = io.ReadFull(conn, received)
+		if err != nil {
+			conn.Close()
+			b.Fatalf("read failed: %v", err)
+		}
+
+		conn.Close()
+	}
+}
+
+// BenchmarkHandleConnect_HTTPProxy measures CONNECT through an upstream HTTP proxy
+func BenchmarkHandleConnect_HTTPProxy(b *testing.B) {
+	// Start echo server as destination
+	destAddr, destCleanup := echoServer(b)
+	defer destCleanup()
+
+	// Start mock upstream HTTP proxy
+	proxyAddr, proxyCleanup := mockHTTPProxy(b)
+	defer proxyCleanup()
+
+	// Parse proxy address
+	host, portStr, _ := net.SplitHostPort(proxyAddr)
+	var port int
+	fmt.Sscanf(portStr, "%d", &port)
+
+	// Create server with HTTP proxy
+	httpProxy := &config.ProxyConfig{Name: "http", Type: "http", Host: host, Port: port}
+	r := testRouter(httpProxy)
+	_, serverAddr, serverCleanup := testServer(b, r)
+	defer serverCleanup()
+
+	// Test data
+	testData := bytes.Repeat([]byte("benchmark data "), 1024) // ~15KB
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(testData) * 2)) // round trip
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
+		if err != nil {
+			b.Fatalf("dial failed: %v", err)
+		}
+
+		// Send CONNECT
+		fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", destAddr, destAddr)
+
+		// Read response
+		reader := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			conn.Close()
+			b.Fatalf("failed to read CONNECT response: %v", err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			conn.Close()
+			b.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+
+		// Send test data
+		_, err = conn.Write(testData)
+		if err != nil {
+			conn.Close()
+			b.Fatalf("write failed: %v", err)
+		}
+
+		// Read echo back
+		received := make([]byte, len(testData))
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err = io.ReadFull(conn, received)
+		if err != nil {
+			conn.Close()
+			b.Fatalf("read failed: %v", err)
+		}
+
+		conn.Close()
+	}
+}
+
+// BenchmarkDial_Direct measures direct dial latency
+func BenchmarkDial_Direct(b *testing.B) {
+	// Start discard server as destination
+	destAddr, destCleanup := discardServer(b)
+	defer destCleanup()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		conn, err := net.Dial("tcp", destAddr)
+		if err != nil {
+			b.Fatalf("dial failed: %v", err)
+		}
+		conn.Close()
+	}
+}
+
+// BenchmarkDial_HTTPProxy measures dial latency through HTTP proxy
+func BenchmarkDial_HTTPProxy(b *testing.B) {
+	// Start discard server as destination
+	destAddr, destCleanup := discardServer(b)
+	defer destCleanup()
+
+	// Start mock upstream HTTP proxy
+	proxyAddr, proxyCleanup := mockHTTPProxy(b)
+	defer proxyCleanup()
+
+	// Parse proxy address
+	host, portStr, _ := net.SplitHostPort(proxyAddr)
+	var port int
+	fmt.Sscanf(portStr, "%d", &port)
+
+	proxyConfig := &config.ProxyConfig{Name: "http", Type: "http", Host: host, Port: port}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		conn, err := dialHTTPBench(proxyConfig, "tcp", destAddr)
+		if err != nil {
+			b.Fatalf("dial failed: %v", err)
+		}
+		conn.Close()
+	}
+}
+
+// dialHTTPBench is a copy of proxy.dialHTTP for benchmarking without import cycle
+func dialHTTPBench(proxyConfig *config.ProxyConfig, network, addr string) (net.Conn, error) {
+	proxyAddr := fmt.Sprintf("%s:%d", proxyConfig.Host, proxyConfig.Port)
+	conn, err := net.Dial(network, proxyAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	req, _ := http.NewRequest("CONNECT", "", nil)
+	req.Host = addr
+	if err := req.Write(conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		conn.Close()
+		return nil, fmt.Errorf("proxy returned status: %s", resp.Status)
+	}
+
+	return conn, nil
+}
+
+// BenchmarkHandleHTTP_Direct measures plain HTTP proxying
+func BenchmarkHandleHTTP_Direct(b *testing.B) {
+	// Start a simple HTTP server as destination
+	destMux := http.NewServeMux()
+	destMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+	destServer := &http.Server{Handler: destMux}
+	destListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatalf("failed to start dest server: %v", err)
+	}
+	go destServer.Serve(destListener)
+	defer destServer.Close()
+
+	destAddr := destListener.Addr().String()
+
+	// Create broxy server with direct proxy
+	directProxy := &config.ProxyConfig{Name: "direct", Type: "direct"}
+	r := testRouter(directProxy)
+	_, serverAddr, serverCleanup := testServer(b, r)
+	defer serverCleanup()
+
+	// Create HTTP client that uses our proxy
+	proxyURL := fmt.Sprintf("http://%s", serverAddr)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: func(*http.Request) (*url.URL, error) {
+				return url.Parse(proxyURL)
+			},
+		},
+	}
+
+	targetURL := fmt.Sprintf("http://%s/", destAddr)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		resp, err := client.Get(targetURL)
+		if err != nil {
+			b.Fatalf("GET failed: %v", err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 	}
 }
