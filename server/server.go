@@ -19,6 +19,14 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// bufferPool reuses 32KB buffers for connection copying
+var bufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
+}
+
 type Server struct {
 	router         *router.Router
 	routerMu       sync.RWMutex
@@ -205,7 +213,10 @@ const defaultIdleTimeout = 60 * time.Second
 
 // copyConn copies data with idle timeout reset per operation
 func copyConn(dst, src net.Conn, idleTimeout time.Duration) (int64, error) {
-	buf := make([]byte, 32*1024)
+	bufPtr := bufferPool.Get().(*[]byte)
+	defer bufferPool.Put(bufPtr)
+	buf := *bufPtr
+
 	var written int64
 	for {
 		src.SetReadDeadline(time.Now().Add(idleTimeout))
