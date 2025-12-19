@@ -680,6 +680,31 @@ func TestTuneTCPConn_NonTCPConn(t *testing.T) {
 	tuneTCPConn(mock) // Should not panic
 }
 
+func TestServer_Close(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Listen: "127.0.0.1", Port: 3128},
+		Proxies: []config.ProxyConfig{
+			{Name: "direct", Type: "direct"},
+		},
+		Rules: []config.Rule{
+			{Match: "default", Proxy: "direct"},
+		},
+	}
+	r := router.New(cfg)
+	s := New(r, "127.0.0.1", 0, "/dev/null")
+
+	// Verify pool was created
+	if s.connPool == nil {
+		t.Fatal("expected connPool to be initialized")
+	}
+
+	// Close should not panic and should close the pool
+	s.Close()
+
+	// Double close should not panic
+	s.Close()
+}
+
 // =============================================================================
 // Benchmark Infrastructure
 // =============================================================================
@@ -861,6 +886,7 @@ func testServer(t testing.TB, r *router.Router) (*Server, string, func()) {
 	cleanup := func() {
 		close(done)
 		listener.Close()
+		s.Close()
 	}
 
 	return s, listener.Addr().String(), cleanup

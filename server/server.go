@@ -35,6 +35,7 @@ type Server struct {
 	configFile     string
 	transports     map[string]*http.Transport
 	transportMu    sync.RWMutex
+	connPool       *proxy.Pool
 }
 
 func New(r *router.Router, listen string, port int, configFile string) *Server {
@@ -44,6 +45,7 @@ func New(r *router.Router, listen string, port int, configFile string) *Server {
 		port:       port,
 		configFile: configFile,
 		transports: make(map[string]*http.Transport),
+		connPool:   proxy.NewPool(proxy.DefaultPoolConfig()),
 	}
 }
 
@@ -209,6 +211,19 @@ func (s *Server) Start() error {
 	return server.ListenAndServe()
 }
 
+// Close shuts down the server's connection pool and releases resources
+func (s *Server) Close() {
+	if s.connPool != nil {
+		s.connPool.Close()
+	}
+	s.transportMu.Lock()
+	for _, t := range s.transports {
+		t.CloseIdleConnections()
+	}
+	s.transports = make(map[string]*http.Transport)
+	s.transportMu.Unlock()
+}
+
 const defaultIdleTimeout = 60 * time.Second
 
 // copyConn copies data with idle timeout reset per operation
@@ -287,8 +302,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Connect through the configured proxy
-	destConn, err := proxy.Dial(proxyConfig, "tcp", r.Host)
+	// Connect through the configured proxy, using pool for HTTP proxies
+	destConn, err := proxy.DialWithPool(proxyConfig, "tcp", r.Host, s.connPool)
 	if err != nil {
 		log.Printf("Error connecting to %s: %v", r.Host, err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
