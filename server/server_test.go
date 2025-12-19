@@ -580,6 +580,107 @@ func runTestConnection(t *testing.T, proxyAddr, upstreamAddr string) {
 }
 
 // =============================================================================
+// Unit Tests for B.1-B.3 Optimizations
+// =============================================================================
+
+func TestBufferPool_GetPut(t *testing.T) {
+	// Get a buffer
+	bufPtr := bufferPool.Get().(*[]byte)
+	if bufPtr == nil {
+		t.Fatal("bufferPool.Get returned nil")
+	}
+	buf := *bufPtr
+
+	// Verify size
+	if len(buf) != 32*1024 {
+		t.Errorf("buffer size = %d, want %d", len(buf), 32*1024)
+	}
+
+	// Write some data
+	for i := range buf {
+		buf[i] = byte(i % 256)
+	}
+
+	// Put it back
+	bufferPool.Put(bufPtr)
+
+	// Get it again (may or may not be the same buffer)
+	bufPtr2 := bufferPool.Get().(*[]byte)
+	if bufPtr2 == nil {
+		t.Fatal("bufferPool.Get returned nil on second call")
+	}
+	if len(*bufPtr2) != 32*1024 {
+		t.Errorf("buffer size = %d, want %d", len(*bufPtr2), 32*1024)
+	}
+	bufferPool.Put(bufPtr2)
+}
+
+func TestBufferPool_ConcurrentAccess(t *testing.T) {
+	// Verify no races with concurrent access
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				bufPtr := bufferPool.Get().(*[]byte)
+				buf := *bufPtr
+				// Use the buffer
+				buf[0] = 42
+				bufferPool.Put(bufPtr)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestTuneTCPConn_RealTCPConn(t *testing.T) {
+	// Create a real TCP listener and connection
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	defer listener.Close()
+
+	// Accept in background
+	done := make(chan struct{})
+	go func() {
+		conn, _ := listener.Accept()
+		if conn != nil {
+			conn.Close()
+		}
+		close(done)
+	}()
+
+	// Dial
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Should not panic
+	tuneTCPConn(conn)
+
+	// Verify it's a TCP connection and options were set
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		t.Fatal("expected *net.TCPConn")
+	}
+
+	// We can't easily verify the options were set, but we can verify no error
+	_ = tcpConn
+
+	<-done
+}
+
+func TestTuneTCPConn_NonTCPConn(t *testing.T) {
+	// tuneTCPConn should not panic on non-TCP connections
+	mock := newMockConn(nil)
+	tuneTCPConn(mock) // Should not panic
+}
+
+// =============================================================================
 // Benchmark Infrastructure
 // =============================================================================
 
