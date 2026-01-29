@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -171,9 +172,14 @@ func (s *Server) Start() error {
 	}
 	defer watcher.Close()
 
-	err = watcher.Add(s.configFile)
-	if err != nil {
-		return fmt.Errorf("failed to watch config file: %w", err)
+	// Watch the parent directory, not the file itself.
+	// Editors perform atomic saves (write temp + rename), which replaces the
+	// file inode and silently kills an inode-level watch. A directory watch
+	// survives because the directory inode is stable.
+	configDir := filepath.Dir(s.configFile)
+	configBase := filepath.Base(s.configFile)
+	if err := watcher.Add(configDir); err != nil {
+		return fmt.Errorf("failed to watch config directory: %w", err)
 	}
 
 	// Start goroutine to handle file changes
@@ -187,16 +193,11 @@ func (s *Server) Start() error {
 				if !ok {
 					return
 				}
-				// Handle Write, Create, Remove, Rename events (editors often do atomic writes)
+				// Only react to events on the config file itself
+				if filepath.Base(event.Name) != configBase {
+					continue
+				}
 				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
-					// Re-add watch in case file was removed/recreated (atomic write)
-					if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-						time.Sleep(100 * time.Millisecond) // Wait for file recreation
-						if err := watcher.Add(s.configFile); err != nil {
-							log.Printf("Failed to re-add watch: %v", err)
-						}
-					}
-
 					// Debounce: wait for writes to settle before reloading
 					debounceMu.Lock()
 					if debounceTimer != nil {
