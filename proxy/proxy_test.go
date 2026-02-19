@@ -117,6 +117,59 @@ func TestDialHTTP_ProxyRefuses(t *testing.T) {
 	}
 }
 
+func TestDial_HTTPProxyHandshakeTimeout(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start listener: %v", err)
+	}
+	defer listener.Close()
+
+	host, portStr, _ := net.SplitHostPort(listener.Addr().String())
+	var port int
+	for i := 0; i < len(portStr); i++ {
+		port = port*10 + int(portStr[i]-'0')
+	}
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 1024)
+		_, _ = conn.Read(buf)
+		time.Sleep(300 * time.Millisecond) // longer than client timeout
+	}()
+
+	cfg := &config.ProxyConfig{
+		Type: "http",
+		Host: host,
+		Port: port,
+	}
+
+	origDialer := defaultDialer
+	defaultDialer = &net.Dialer{
+		Timeout:   100 * time.Millisecond,
+		KeepAlive: 30 * time.Second,
+	}
+	defer func() { defaultDialer = origDialer }()
+
+	start := time.Now()
+	_, err = Dial(cfg, "tcp", "example.com:443")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Fatalf("expected timeout net.Error, got %T: %v", err, err)
+	}
+	if elapsed < 50*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Fatalf("elapsed = %v, expected timeout around 100ms", elapsed)
+	}
+}
+
 func TestDialWithPool_Direct(t *testing.T) {
 	// Start a TCP server
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -225,4 +278,60 @@ func TestDialWithPool_HTTPProxy(t *testing.T) {
 		t.Fatalf("DialWithPool failed: %v", err)
 	}
 	conn.Close()
+}
+
+func TestDialWithPool_HTTPProxyHandshakeTimeout(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start listener: %v", err)
+	}
+	defer listener.Close()
+
+	host, portStr, _ := net.SplitHostPort(listener.Addr().String())
+	var port int
+	for i := 0; i < len(portStr); i++ {
+		port = port*10 + int(portStr[i]-'0')
+	}
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 1024)
+		_, _ = conn.Read(buf)
+		time.Sleep(300 * time.Millisecond) // longer than client timeout
+	}()
+
+	cfg := &config.ProxyConfig{
+		Type: "http",
+		Host: host,
+		Port: port,
+	}
+
+	pool := NewPool(DefaultPoolConfig())
+	defer pool.Close()
+
+	origDialer := defaultDialer
+	defaultDialer = &net.Dialer{
+		Timeout:   100 * time.Millisecond,
+		KeepAlive: 30 * time.Second,
+	}
+	defer func() { defaultDialer = origDialer }()
+
+	start := time.Now()
+	_, err = DialWithPool(cfg, "tcp", "example.com:443", pool)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Fatalf("expected timeout net.Error, got %T: %v", err, err)
+	}
+	if elapsed < 50*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Fatalf("elapsed = %v, expected timeout around 100ms", elapsed)
+	}
 }

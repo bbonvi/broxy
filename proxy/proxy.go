@@ -19,6 +19,58 @@ var defaultDialer = &net.Dialer{
 	KeepAlive: 30 * time.Second,
 }
 
+// connectHandshakeTimeout returns the timeout used for HTTP CONNECT handshake.
+func connectHandshakeTimeout() time.Duration {
+	if defaultDialer != nil && defaultDialer.Timeout > 0 {
+		return defaultDialer.Timeout
+	}
+	return 30 * time.Second
+}
+
+func connectHTTPProxy(conn net.Conn, proxyConfig *config.ProxyConfig, addr string) error {
+	req := &http.Request{
+		Method: "CONNECT",
+		URL: &url.URL{
+			Host: addr,
+		},
+		Host:       addr,
+		Header:     make(http.Header),
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+	}
+
+	// Add authentication if configured
+	if proxyConfig.Auth != nil {
+		auth := proxyConfig.Auth.Username + ":" + proxyConfig.Auth.Password
+		basicAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
+		req.Header.Set("Proxy-Authorization", basicAuth)
+	}
+
+	// Bound both write and read of CONNECT handshake.
+	timeout := connectHandshakeTimeout()
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	defer conn.SetDeadline(time.Time{})
+
+	if err := req.Write(conn); err != nil {
+		return err
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("proxy returned status: %s", resp.Status)
+	}
+
+	return nil
+}
+
 // Dial creates a connection through the specified proxy
 func Dial(proxyConfig *config.ProxyConfig, network, addr string) (net.Conn, error) {
 	switch proxyConfig.Type {
@@ -40,42 +92,9 @@ func dialHTTP(proxyConfig *config.ProxyConfig, network, addr string) (net.Conn, 
 		return nil, err
 	}
 
-	// Send CONNECT request to upstream proxy
-	req := &http.Request{
-		Method: "CONNECT",
-		URL: &url.URL{
-			Host: addr,
-		},
-		Host:   addr,
-		Header: make(http.Header),
-		Proto:  "HTTP/1.1",
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-	}
-
-	// Add authentication if configured
-	if proxyConfig.Auth != nil {
-		auth := proxyConfig.Auth.Username + ":" + proxyConfig.Auth.Password
-		basicAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
-		req.Header.Set("Proxy-Authorization", basicAuth)
-	}
-
-	if err := req.Write(conn); err != nil {
+	if err := connectHTTPProxy(conn, proxyConfig, addr); err != nil {
 		conn.Close()
 		return nil, err
-	}
-
-	// Read response
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		conn.Close()
-		return nil, fmt.Errorf("proxy returned status: %s", resp.Status)
 	}
 
 	return conn, nil
@@ -130,42 +149,9 @@ func dialHTTPWithPool(proxyConfig *config.ProxyConfig, network, addr string, poo
 		return nil, err
 	}
 
-	// Send CONNECT request to upstream proxy
-	req := &http.Request{
-		Method: "CONNECT",
-		URL: &url.URL{
-			Host: addr,
-		},
-		Host:       addr,
-		Header:     make(http.Header),
-		Proto:      "HTTP/1.1",
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-	}
-
-	// Add authentication if configured
-	if proxyConfig.Auth != nil {
-		auth := proxyConfig.Auth.Username + ":" + proxyConfig.Auth.Password
-		basicAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
-		req.Header.Set("Proxy-Authorization", basicAuth)
-	}
-
-	if err := req.Write(conn); err != nil {
+	if err := connectHTTPProxy(conn, proxyConfig, addr); err != nil {
 		conn.Close()
 		return nil, err
-	}
-
-	// Read response
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		conn.Close()
-		return nil, fmt.Errorf("proxy returned status: %s", resp.Status)
 	}
 
 	return conn, nil
