@@ -25,7 +25,9 @@ type compiledRule struct {
 }
 
 type Router struct {
-	rules []compiledRule
+	rules          []compiledRule
+	hasDomainRules bool
+	hasIPRules     bool
 }
 
 // New builds a Router with precompiled matchers to avoid per-request parsing.
@@ -36,6 +38,8 @@ func New(cfg *config.Config) *Router {
 	}
 
 	compiled := make([]compiledRule, 0, len(cfg.Rules))
+	hasDomainRules := false
+	hasIPRules := false
 	for i := range cfg.Rules {
 		rule := cfg.Rules[i]
 		cr := compiledRule{
@@ -45,6 +49,7 @@ func New(cfg *config.Config) *Router {
 		switch rule.Match {
 		case "domain":
 			cr.match = matchDomain
+			hasDomainRules = true
 			for _, value := range ruleValues(rule) {
 				cr.domainSuffixes = append(cr.domainSuffixes, value)
 				if strings.HasPrefix(value, ".") && len(value) > 1 {
@@ -53,6 +58,7 @@ func New(cfg *config.Config) *Router {
 			}
 		case "ip":
 			cr.match = matchIP
+			hasIPRules = true
 			for _, value := range ruleValues(rule) {
 				if strings.Contains(value, "/") {
 					if prefix, err := netip.ParsePrefix(value); err == nil {
@@ -73,14 +79,20 @@ func New(cfg *config.Config) *Router {
 	}
 
 	return &Router{
-		rules: compiled,
+		rules:          compiled,
+		hasDomainRules: hasDomainRules,
+		hasIPRules:     hasIPRules,
 	}
 }
 
 // Route returns the proxy config for the given host
 func (r *Router) Route(host string) *config.ProxyConfig {
 	domain := extractHost(host)
-	ip, isIP := parseLiteralIP(domain)
+	var ip netip.Addr
+	isIP := false
+	if r.hasDomainRules || r.hasIPRules {
+		ip, isIP = parseLiteralIP(domain)
+	}
 	for _, rule := range r.rules {
 		switch rule.match {
 		case matchIP:
