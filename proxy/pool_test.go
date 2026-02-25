@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -402,4 +404,97 @@ func TestPool_Sweeper(t *testing.T) {
 	if count != 0 {
 		t.Errorf("Expected 0 pooled connections after sweep, got %d", count)
 	}
+}
+
+// BenchmarkPoolContention stresses Get/Put lock contention for mutex profiling.
+// Example:
+// go test ./proxy -run '^$' -bench '^BenchmarkPoolContention$' -benchtime=3s -mutexprofile .dev/pool_mutex.out
+func BenchmarkPoolContention(b *testing.B) {
+	for _, hostCount := range []int{1, 32} {
+		b.Run(fmt.Sprintf("hosts=%d", hostCount), func(b *testing.B) {
+			benchmarkPoolContentionByHosts(b, hostCount)
+		})
+	}
+}
+
+func benchmarkPoolContentionByHosts(b *testing.B, hostCount int) {
+	addrs, cleanup := startPoolBenchListeners(b, hostCount)
+	defer cleanup()
+
+	p := NewPool(PoolConfig{
+		MaxIdlePerHost: 256,
+		MaxIdleTotal:   hostCount * 256,
+		IdleTimeout:    2 * time.Minute,
+	})
+	defer p.Close()
+
+	// Pre-fill idle lists so benchmark exercises pool reuse/locking, not dial latency.
+	for _, addr := range addrs {
+		for i := 0; i < 64; i++ {
+			conn, err := directDial("tcp", addr)
+			if err != nil {
+				b.Fatalf("failed to warm pool for %s: %v", addr, err)
+			}
+			p.Put(conn, addr)
+		}
+	}
+
+	var workerID uint64
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		idx := int(atomic.AddUint64(&workerID, 1)-1) % len(addrs)
+		addr := addrs[idx]
+		for pb.Next() {
+			conn, err := p.Get("tcp", addr)
+			if err != nil {
+				b.Fatalf("Get failed: %v", err)
+			}
+			p.Put(conn, addr)
+		}
+	})
+}
+
+func startPoolBenchListeners(tb testing.TB, count int) ([]string, func()) {
+	tb.Helper()
+
+	listeners := make([]net.Listener, 0, count)
+	addrs := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			for _, l := range listeners {
+				l.Close()
+			}
+			tb.Fatalf("failed to create benchmark listener %d: %v", i, err)
+		}
+		listeners = append(listeners, ln)
+		addrs = append(addrs, ln.Addr().String())
+
+		go func(l net.Listener) {
+			for {
+				conn, err := l.Accept()
+				if err != nil {
+					return
+				}
+				go func(c net.Conn) {
+					defer c.Close()
+					buf := make([]byte, 1)
+					for {
+						if _, err := c.Read(buf); err != nil {
+							return
+						}
+					}
+				}(conn)
+			}
+		}(ln)
+	}
+
+	cleanup := func() {
+		for _, l := range listeners {
+			l.Close()
+		}
+	}
+	return addrs, cleanup
 }

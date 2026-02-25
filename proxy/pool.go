@@ -67,34 +67,38 @@ func NewPool(cfg PoolConfig) *Pool {
 
 // Get retrieves an idle connection from the pool or dials a new one
 func (p *Pool) Get(network, addr string) (net.Conn, error) {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil, ErrPoolClosed
-	}
+	for {
+		var pc *pooledConn
 
-	// Try to get an idle connection
-	if connList, ok := p.conns[addr]; ok {
-		for connList.Len() > 0 {
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return nil, ErrPoolClosed
+		}
+
+		// Pop one idle connection while holding lock, then validate outside lock.
+		if connList, ok := p.conns[addr]; ok && connList.Len() > 0 {
 			elem := connList.Front()
 			connList.Remove(elem)
 			p.idleCount--
-
-			pc := elem.Value.(*pooledConn)
-
-			// Check if connection is alive
-			if p.isAlive(pc.conn) {
-				p.mu.Unlock()
-				return pc.conn, nil
+			if connList.Len() == 0 {
+				delete(p.conns, addr)
 			}
-			// Dead connection, close and try next
-			pc.conn.Close()
+			pc = elem.Value.(*pooledConn)
 		}
-	}
-	p.mu.Unlock()
+		p.mu.Unlock()
 
-	// No idle connection available, dial new
-	return directDial(network, addr)
+		// No idle connection available, dial new.
+		if pc == nil {
+			return directDial(network, addr)
+		}
+
+		// Dead connections are discarded and we retry for another pooled entry.
+		if p.isAlive(pc.conn) {
+			return pc.conn, nil
+		}
+		pc.conn.Close()
+	}
 }
 
 // Put returns a connection to the pool for reuse
