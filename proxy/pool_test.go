@@ -135,12 +135,7 @@ func TestPool_MaxIdlePerHost(t *testing.T) {
 
 	// Only 2 should be pooled (MaxIdlePerHost = 2)
 	// Third should have been closed
-	p.mu.Lock()
-	count := 0
-	if list, ok := p.conns[addr]; ok {
-		count = list.Len()
-	}
-	p.mu.Unlock()
+	count := p.hostLen(addr)
 
 	if count != 2 {
 		t.Errorf("Pool has %d connections, want 2", count)
@@ -193,12 +188,67 @@ func TestPool_MaxIdleTotal(t *testing.T) {
 	}
 
 	// Total idle should be capped at 3
-	p.mu.Lock()
-	total := p.idleCount
-	p.mu.Unlock()
+	total := p.Len()
 
 	if total != 3 {
 		t.Errorf("Total idle = %d, want 3", total)
+	}
+}
+
+func TestPool_MaxIdleTotal_Concurrent(t *testing.T) {
+	cfg := PoolConfig{
+		MaxIdlePerHost: 20,
+		MaxIdleTotal:   10,
+		IdleTimeout:    30 * time.Second,
+	}
+
+	p := NewPool(cfg)
+	defer p.Close()
+
+	listeners := make([]net.Listener, 8)
+	addrs := make([]string, 8)
+	for i := 0; i < 8; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Failed to create listener %d: %v", i, err)
+		}
+		listeners[i] = ln
+		addrs[i] = ln.Addr().String()
+		defer ln.Close()
+
+		go func(l net.Listener) {
+			for {
+				conn, err := l.Accept()
+				if err != nil {
+					return
+				}
+				go func(c net.Conn) {
+					buf := make([]byte, 1)
+					c.Read(buf)
+				}(conn)
+			}
+		}(ln)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			addr := addrs[id%len(addrs)]
+			for j := 0; j < 10; j++ {
+				c, err := p.Get("tcp", addr)
+				if err != nil {
+					return
+				}
+				p.Put(c, addr)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if total := p.Len(); total > cfg.MaxIdleTotal {
+		t.Fatalf("Total idle = %d, exceeded MaxIdleTotal=%d", total, cfg.MaxIdleTotal)
 	}
 }
 
@@ -387,9 +437,7 @@ func TestPool_Sweeper(t *testing.T) {
 	p.Put(c, addr)
 
 	// Verify it's pooled
-	p.mu.Lock()
-	count := p.idleCount
-	p.mu.Unlock()
+	count := p.Len()
 	if count != 1 {
 		t.Fatalf("Expected 1 pooled connection, got %d", count)
 	}
@@ -398,9 +446,7 @@ func TestPool_Sweeper(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Should be evicted
-	p.mu.Lock()
-	count = p.idleCount
-	p.mu.Unlock()
+	count = p.Len()
 	if count != 0 {
 		t.Errorf("Expected 0 pooled connections after sweep, got %d", count)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,15 +34,21 @@ type pooledConn struct {
 	idleSince time.Time
 }
 
+type poolShard struct {
+	mu    sync.Mutex
+	conns map[string]*list.List // host -> list of *pooledConn
+}
+
 // Pool manages reusable TCP connections to upstream proxies
 type Pool struct {
-	mu        sync.Mutex
 	config    PoolConfig
-	conns     map[string]*list.List // host -> list of *pooledConn
-	idleCount int
-	closed    bool
+	shards    []poolShard
+	idleCount atomic.Int64
+	closed    atomic.Bool
 	closedCh  chan struct{}
 }
+
+const poolShardCount = 32
 
 // NewPool creates a new connection pool and starts the background sweeper
 func NewPool(cfg PoolConfig) *Pool {
@@ -57,36 +64,67 @@ func NewPool(cfg PoolConfig) *Pool {
 
 	p := &Pool{
 		config:   cfg,
-		conns:    make(map[string]*list.List),
+		shards:   make([]poolShard, poolShardCount),
 		closedCh: make(chan struct{}),
+	}
+	for i := range p.shards {
+		p.shards[i].conns = make(map[string]*list.List)
 	}
 
 	go p.sweeper()
 	return p
 }
 
+func hashAddr(addr string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(addr); i++ {
+		h ^= uint32(addr[i])
+		h *= 16777619
+	}
+	return h
+}
+
+func (p *Pool) shardFor(addr string) *poolShard {
+	idx := int(hashAddr(addr) % uint32(len(p.shards)))
+	return &p.shards[idx]
+}
+
+func (p *Pool) tryIncrementIdleCount() bool {
+	maxIdleTotal := int64(p.config.MaxIdleTotal)
+	for {
+		current := p.idleCount.Load()
+		if current >= maxIdleTotal {
+			return false
+		}
+		if p.idleCount.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
 // Get retrieves an idle connection from the pool or dials a new one
 func (p *Pool) Get(network, addr string) (net.Conn, error) {
+	shard := p.shardFor(addr)
 	for {
 		var pc *pooledConn
 
-		p.mu.Lock()
-		if p.closed {
-			p.mu.Unlock()
+		shard.mu.Lock()
+		if p.closed.Load() {
+			shard.mu.Unlock()
 			return nil, ErrPoolClosed
 		}
 
 		// Pop one idle connection while holding lock, then validate outside lock.
-		if connList, ok := p.conns[addr]; ok && connList.Len() > 0 {
+		if connList, ok := shard.conns[addr]; ok && connList.Len() > 0 {
 			elem := connList.Front()
 			connList.Remove(elem)
-			p.idleCount--
+			p.idleCount.Add(-1)
 			if connList.Len() == 0 {
-				delete(p.conns, addr)
+				delete(shard.conns, addr)
 			}
 			pc = elem.Value.(*pooledConn)
 		}
-		p.mu.Unlock()
+		shard.mu.Unlock()
 
 		// No idle connection available, dial new.
 		if pc == nil {
@@ -103,29 +141,40 @@ func (p *Pool) Get(network, addr string) (net.Conn, error) {
 
 // Put returns a connection to the pool for reuse
 func (p *Pool) Put(conn net.Conn, addr string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.closed {
+	if p.closed.Load() {
 		conn.Close()
 		return
 	}
 
-	// Check total limit
-	if p.idleCount >= p.config.MaxIdleTotal {
+	shard := p.shardFor(addr)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	if p.closed.Load() {
 		conn.Close()
 		return
 	}
 
 	// Get or create list for this host
-	connList, ok := p.conns[addr]
+	connList, ok := shard.conns[addr]
 	if !ok {
 		connList = list.New()
-		p.conns[addr] = connList
+		shard.conns[addr] = connList
 	}
 
 	// Check per-host limit
 	if connList.Len() >= p.config.MaxIdlePerHost {
+		conn.Close()
+		return
+	}
+
+	// Check total limit across all shards
+	if !p.tryIncrementIdleCount() {
+		conn.Close()
+		return
+	}
+	if p.closed.Load() {
+		p.idleCount.Add(-1)
 		conn.Close()
 		return
 	}
@@ -136,29 +185,32 @@ func (p *Pool) Put(conn net.Conn, addr string) {
 		idleSince: time.Now(),
 	}
 	connList.PushFront(pc)
-	p.idleCount++
 }
 
 // Close shuts down the pool and closes all idle connections
 func (p *Pool) Close() {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
+	if !p.closed.CompareAndSwap(false, true) {
 		return
 	}
-	p.closed = true
 	close(p.closedCh)
 
-	// Close all idle connections
-	for _, connList := range p.conns {
-		for elem := connList.Front(); elem != nil; elem = elem.Next() {
-			pc := elem.Value.(*pooledConn)
-			pc.conn.Close()
+	var removed int64
+	for i := range p.shards {
+		shard := &p.shards[i]
+		shard.mu.Lock()
+		for _, connList := range shard.conns {
+			for elem := connList.Front(); elem != nil; elem = elem.Next() {
+				pc := elem.Value.(*pooledConn)
+				pc.conn.Close()
+				removed++
+			}
 		}
+		shard.conns = make(map[string]*list.List)
+		shard.mu.Unlock()
 	}
-	p.conns = make(map[string]*list.List)
-	p.idleCount = 0
-	p.mu.Unlock()
+	if removed > 0 {
+		p.idleCount.Add(-removed)
+	}
 }
 
 // isAlive checks if a connection is still usable using a 1ms read timeout probe
@@ -210,42 +262,53 @@ func (p *Pool) sweeper() {
 
 // sweep removes connections that have been idle too long
 func (p *Pool) sweep() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.closed {
+	if p.closed.Load() {
 		return
 	}
 
 	now := time.Now()
-	for addr, connList := range p.conns {
-		// Iterate from back (oldest) to front (newest)
-		var next *list.Element
-		for elem := connList.Back(); elem != nil; elem = next {
-			next = elem.Prev()
-			pc := elem.Value.(*pooledConn)
+	for i := range p.shards {
+		shard := &p.shards[i]
+		shard.mu.Lock()
+		for addr, connList := range shard.conns {
+			// Iterate from back (oldest) to front (newest)
+			var next *list.Element
+			for elem := connList.Back(); elem != nil; elem = next {
+				next = elem.Prev()
+				pc := elem.Value.(*pooledConn)
 
-			if now.Sub(pc.idleSince) > p.config.IdleTimeout {
-				connList.Remove(elem)
-				pc.conn.Close()
-				p.idleCount--
-			} else {
-				// Connections are ordered by time, so if this one is fresh,
-				// all remaining ones (toward front) are also fresh
-				break
+				if now.Sub(pc.idleSince) > p.config.IdleTimeout {
+					connList.Remove(elem)
+					pc.conn.Close()
+					p.idleCount.Add(-1)
+				} else {
+					// Connections are ordered by time, so if this one is fresh,
+					// all remaining ones (toward front) are also fresh
+					break
+				}
+			}
+
+			// Clean up empty lists
+			if connList.Len() == 0 {
+				delete(shard.conns, addr)
 			}
 		}
-
-		// Clean up empty lists
-		if connList.Len() == 0 {
-			delete(p.conns, addr)
-		}
+		shard.mu.Unlock()
 	}
 }
 
 // Len returns the current number of idle connections (for testing)
 func (p *Pool) Len() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.idleCount
+	return int(p.idleCount.Load())
+}
+
+func (p *Pool) hostLen(addr string) int {
+	shard := p.shardFor(addr)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	if connList, ok := shard.conns[addr]; ok {
+		return connList.Len()
+	}
+	return 0
 }
