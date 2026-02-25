@@ -13,6 +13,8 @@ A simple proxy forwarder written in Go. Routes requests through different upstre
 - YAML-based configuration
 - Live config reloading
 - Connection pooling for upstream HTTP proxies
+- Precompiled routing matchers (domain/IP/CIDR parsed at startup)
+- Direct-mode hostname dial cache (short TTL) to reduce repeated DNS lookups
 
 ## Installation
 

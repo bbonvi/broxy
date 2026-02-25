@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"broxy/config"
@@ -29,6 +31,26 @@ var systemDialer = &net.Dialer{
 	KeepAlive: 30 * time.Second,
 }
 
+const (
+	dialAddrCacheTTL       = 30 * time.Second
+	dialAddrCacheMaxEntries = 2048
+)
+
+type dialAddrCacheEntry struct {
+	addr      string
+	expiresAt time.Time
+}
+
+// dialAddrCache stores short-lived hostname -> ip:port mappings for direct mode.
+type dialAddrCache struct {
+	mu      sync.RWMutex
+	entries map[string]dialAddrCacheEntry
+}
+
+var directDialCache = &dialAddrCache{
+	entries: make(map[string]dialAddrCacheEntry),
+}
+
 // connectHandshakeTimeout returns the timeout used for HTTP CONNECT handshake.
 func connectHandshakeTimeout() time.Duration {
 	if defaultDialer != nil && defaultDialer.Timeout > 0 {
@@ -46,11 +68,66 @@ func shouldFallbackToSystemResolver(err error) bool {
 }
 
 func directDial(network, addr string) (net.Conn, error) {
-	conn, err := defaultDialer.Dial(network, addr)
-	if err == nil || !shouldFallbackToSystemResolver(err) {
-		return conn, err
+	// Fast path for IP literals, which dominate CONNECT benchmarks.
+	if addr != "" {
+		first := addr[0]
+		if (first >= '0' && first <= '9') || first == '[' {
+			return dialWithResolverFallback(network, addr)
+		}
 	}
-	return systemDialer.Dial(network, addr)
+
+	host, port, hasPort := splitDialAddress(addr)
+	if !hasPort || isLiteralIP(host) {
+		return dialWithResolverFallback(network, addr)
+	}
+
+	cacheKey := dialCacheKey(network, host, port)
+	if cachedAddr, ok := directDialCache.get(cacheKey); ok {
+		conn, err := defaultDialer.Dial(network, cachedAddr)
+		if err == nil {
+			return conn, nil
+		}
+		directDialCache.delete(cacheKey)
+	}
+
+	conn, err := dialWithResolverFallback(network, addr)
+	if err != nil {
+		return nil, err
+	}
+	directDialCache.storeFromConn(network, host, port, conn)
+	return conn, nil
+}
+
+// directDialContext mirrors directDial but respects caller cancellation.
+func directDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	// Fast path for IP literals, which dominate CONNECT benchmarks.
+	if addr != "" {
+		first := addr[0]
+		if (first >= '0' && first <= '9') || first == '[' {
+			return dialWithResolverFallbackContext(ctx, network, addr)
+		}
+	}
+
+	host, port, hasPort := splitDialAddress(addr)
+	if !hasPort || isLiteralIP(host) {
+		return dialWithResolverFallbackContext(ctx, network, addr)
+	}
+
+	cacheKey := dialCacheKey(network, host, port)
+	if cachedAddr, ok := directDialCache.get(cacheKey); ok {
+		conn, err := defaultDialer.DialContext(ctx, network, cachedAddr)
+		if err == nil {
+			return conn, nil
+		}
+		directDialCache.delete(cacheKey)
+	}
+
+	conn, err := dialWithResolverFallbackContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	directDialCache.storeFromConn(network, host, port, conn)
+	return conn, nil
 }
 
 type socksFallbackDialer struct{}
@@ -61,11 +138,134 @@ func (d socksFallbackDialer) Dial(network, addr string) (net.Conn, error) {
 
 // DirectDialContext dials outbound targets using broxy's shared dialer settings.
 func DirectDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return directDialContext(ctx, network, addr)
+}
+
+func dialWithResolverFallback(network, addr string) (net.Conn, error) {
+	conn, err := defaultDialer.Dial(network, addr)
+	if err == nil || !shouldFallbackToSystemResolver(err) {
+		return conn, err
+	}
+	return systemDialer.Dial(network, addr)
+}
+
+func dialWithResolverFallbackContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	conn, err := defaultDialer.DialContext(ctx, network, addr)
 	if err == nil || !shouldFallbackToSystemResolver(err) {
 		return conn, err
 	}
 	return systemDialer.DialContext(ctx, network, addr)
+}
+
+func splitDialAddress(addr string) (host, port string, ok bool) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", "", false
+	}
+	return host, port, true
+}
+
+func dialCacheKey(network, host, port string) string {
+	return network + "|" + host + "|" + port
+}
+
+func isLiteralIP(host string) bool {
+	if host == "" {
+		return false
+	}
+
+	hasColon := false
+	for i := 0; i < len(host); i++ {
+		ch := host[i]
+		switch {
+		case ch >= '0' && ch <= '9':
+		case ch == '.':
+		case ch == ':':
+			hasColon = true
+		case hasColon && ((ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') || ch == '%'):
+		default:
+			return false
+		}
+	}
+
+	_, err := netip.ParseAddr(host)
+	return err == nil
+}
+
+func (c *dialAddrCache) get(key string) (string, bool) {
+	now := time.Now()
+
+	c.mu.RLock()
+	entry, ok := c.entries[key]
+	c.mu.RUnlock()
+	if !ok {
+		return "", false
+	}
+	if !entry.expiresAt.After(now) {
+		c.deleteExpired(key, now)
+		return "", false
+	}
+	return entry.addr, true
+}
+
+func (c *dialAddrCache) put(key, addr string) {
+	if addr == "" {
+		return
+	}
+
+	now := time.Now()
+	expiresAt := now.Add(dialAddrCacheTTL)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.entries) >= dialAddrCacheMaxEntries {
+		for existingKey, entry := range c.entries {
+			if !entry.expiresAt.After(now) {
+				delete(c.entries, existingKey)
+			}
+		}
+	}
+	if len(c.entries) >= dialAddrCacheMaxEntries {
+		for existingKey := range c.entries {
+			delete(c.entries, existingKey)
+			break
+		}
+	}
+
+	c.entries[key] = dialAddrCacheEntry{
+		addr:      addr,
+		expiresAt: expiresAt,
+	}
+}
+
+func (c *dialAddrCache) delete(key string) {
+	c.mu.Lock()
+	delete(c.entries, key)
+	c.mu.Unlock()
+}
+
+func (c *dialAddrCache) deleteExpired(key string, now time.Time) {
+	c.mu.Lock()
+	entry, ok := c.entries[key]
+	if ok && !entry.expiresAt.After(now) {
+		delete(c.entries, key)
+	}
+	c.mu.Unlock()
+}
+
+func (c *dialAddrCache) storeFromConn(network, host, port string, conn net.Conn) {
+	tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr)
+	if !ok || tcpAddr.IP == nil {
+		return
+	}
+	c.put(dialCacheKey(network, host, port), net.JoinHostPort(tcpAddr.IP.String(), port))
+}
+
+func (c *dialAddrCache) clear() {
+	c.mu.Lock()
+	c.entries = make(map[string]dialAddrCacheEntry)
+	c.mu.Unlock()
 }
 
 func connectHTTPProxy(conn net.Conn, proxyConfig *config.ProxyConfig, addr string) error {

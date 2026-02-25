@@ -244,18 +244,43 @@ func (s *Server) Close() {
 
 const defaultIdleTimeout = 60 * time.Second
 
+// deadlineRefreshInterval controls how often copyConn extends read/write deadlines.
+func deadlineRefreshInterval(idleTimeout time.Duration) time.Duration {
+	interval := idleTimeout / 4
+	if interval < 10*time.Millisecond {
+		return 10 * time.Millisecond
+	}
+	if interval > time.Second {
+		return time.Second
+	}
+	return interval
+}
+
 // copyConn copies data with idle timeout reset per operation
 func copyConn(dst, src net.Conn, idleTimeout time.Duration) (int64, error) {
 	bufPtr := bufferPool.Get().(*[]byte)
 	defer bufferPool.Put(bufPtr)
 	buf := *bufPtr
 
+	refreshEvery := deadlineRefreshInterval(idleTimeout)
+	var nextReadDeadlineSet time.Time
+	var nextWriteDeadlineSet time.Time
+
 	var written int64
 	for {
-		src.SetReadDeadline(time.Now().Add(idleTimeout))
+		now := time.Now()
+		if now.After(nextReadDeadlineSet) {
+			src.SetReadDeadline(now.Add(idleTimeout))
+			nextReadDeadlineSet = now.Add(refreshEvery)
+		}
+
 		nr, rerr := src.Read(buf)
 		if nr > 0 {
-			dst.SetWriteDeadline(time.Now().Add(idleTimeout))
+			now = time.Now()
+			if now.After(nextWriteDeadlineSet) {
+				dst.SetWriteDeadline(now.Add(idleTimeout))
+				nextWriteDeadlineSet = now.Add(refreshEvery)
+			}
 			nw, werr := dst.Write(buf[:nr])
 			written += int64(nw)
 			if werr != nil {
