@@ -94,7 +94,7 @@ func (p *Pool) Get(network, addr string) (net.Conn, error) {
 	p.mu.Unlock()
 
 	// No idle connection available, dial new
-	return defaultDialer.Dial(network, addr)
+	return directDial(network, addr)
 }
 
 // Put returns a connection to the pool for reuse

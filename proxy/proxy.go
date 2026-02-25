@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -17,6 +19,14 @@ import (
 var defaultDialer = &net.Dialer{
 	Timeout:   30 * time.Second,
 	KeepAlive: 30 * time.Second,
+	// PreferGo avoids libc resolver behavior that can serialize/fallback slowly
+	// on some hosts, which appears as synchronized 5-10s stalls.
+	Resolver: &net.Resolver{PreferGo: true},
+}
+
+var systemDialer = &net.Dialer{
+	Timeout:   30 * time.Second,
+	KeepAlive: 30 * time.Second,
 }
 
 // connectHandshakeTimeout returns the timeout used for HTTP CONNECT handshake.
@@ -25,6 +35,37 @@ func connectHandshakeTimeout() time.Duration {
 		return defaultDialer.Timeout
 	}
 	return 30 * time.Second
+}
+
+func shouldFallbackToSystemResolver(err error) bool {
+	var dnsErr *net.DNSError
+	if !errors.As(err, &dnsErr) {
+		return false
+	}
+	return !dnsErr.Timeout()
+}
+
+func directDial(network, addr string) (net.Conn, error) {
+	conn, err := defaultDialer.Dial(network, addr)
+	if err == nil || !shouldFallbackToSystemResolver(err) {
+		return conn, err
+	}
+	return systemDialer.Dial(network, addr)
+}
+
+type socksFallbackDialer struct{}
+
+func (d socksFallbackDialer) Dial(network, addr string) (net.Conn, error) {
+	return directDial(network, addr)
+}
+
+// DirectDialContext dials outbound targets using broxy's shared dialer settings.
+func DirectDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := defaultDialer.DialContext(ctx, network, addr)
+	if err == nil || !shouldFallbackToSystemResolver(err) {
+		return conn, err
+	}
+	return systemDialer.DialContext(ctx, network, addr)
 }
 
 func connectHTTPProxy(conn net.Conn, proxyConfig *config.ProxyConfig, addr string) error {
@@ -75,7 +116,7 @@ func connectHTTPProxy(conn net.Conn, proxyConfig *config.ProxyConfig, addr strin
 func Dial(proxyConfig *config.ProxyConfig, network, addr string) (net.Conn, error) {
 	switch proxyConfig.Type {
 	case "direct":
-		return defaultDialer.Dial(network, addr)
+		return directDial(network, addr)
 	case "http":
 		return dialHTTP(proxyConfig, network, addr)
 	case "socks5":
@@ -87,7 +128,7 @@ func Dial(proxyConfig *config.ProxyConfig, network, addr string) (net.Conn, erro
 
 func dialHTTP(proxyConfig *config.ProxyConfig, network, addr string) (net.Conn, error) {
 	proxyAddr := fmt.Sprintf("%s:%d", proxyConfig.Host, proxyConfig.Port)
-	conn, err := defaultDialer.Dial(network, proxyAddr)
+	conn, err := directDial(network, proxyAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +152,7 @@ func dialSOCKS5(proxyConfig *config.ProxyConfig, network, addr string) (net.Conn
 		}
 	}
 
-	dialer, err := proxy.SOCKS5(network, proxyAddr, auth, defaultDialer)
+	dialer, err := proxy.SOCKS5(network, proxyAddr, auth, socksFallbackDialer{})
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +166,7 @@ func dialSOCKS5(proxyConfig *config.ProxyConfig, network, addr string) (net.Conn
 func DialWithPool(proxyConfig *config.ProxyConfig, network, addr string, pool *Pool) (net.Conn, error) {
 	switch proxyConfig.Type {
 	case "direct":
-		return defaultDialer.Dial(network, addr)
+		return directDial(network, addr)
 	case "http":
 		return dialHTTPWithPool(proxyConfig, network, addr, pool)
 	case "socks5":
@@ -143,7 +184,7 @@ func dialHTTPWithPool(proxyConfig *config.ProxyConfig, network, addr string, poo
 	if pool != nil {
 		conn, err = pool.Get(network, proxyAddr)
 	} else {
-		conn, err = defaultDialer.Dial(network, proxyAddr)
+		conn, err = directDial(network, proxyAddr)
 	}
 	if err != nil {
 		return nil, err

@@ -20,6 +20,27 @@ func TestDefaultDialer_HasKeepalive(t *testing.T) {
 	}
 }
 
+func TestDefaultDialer_UsesGoResolver(t *testing.T) {
+	if defaultDialer.Resolver == nil {
+		t.Fatal("Resolver is nil, want pure Go resolver configured")
+	}
+	if !defaultDialer.Resolver.PreferGo {
+		t.Fatal("Resolver.PreferGo = false, want true")
+	}
+}
+
+func TestShouldFallbackToSystemResolver(t *testing.T) {
+	if !shouldFallbackToSystemResolver(&net.DNSError{Name: "example.com", Err: "no such host"}) {
+		t.Fatal("expected fallback for non-timeout DNS errors")
+	}
+	if shouldFallbackToSystemResolver(&net.DNSError{Name: "example.com", Err: "i/o timeout", IsTimeout: true}) {
+		t.Fatal("did not expect fallback for timeout DNS errors")
+	}
+	if shouldFallbackToSystemResolver(&net.OpError{Err: net.ErrClosed}) {
+		t.Fatal("did not expect fallback for non-DNS errors")
+	}
+}
+
 func TestDial_Direct(t *testing.T) {
 	// Start a TCP server
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

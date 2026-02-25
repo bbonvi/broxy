@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -16,16 +17,17 @@ import (
 	"time"
 
 	"broxy/config"
+	"broxy/proxy"
 	"broxy/router"
 )
 
 // mockConn implements net.Conn for testing
 type mockConn struct {
-	readBuf    *bytes.Buffer
-	writeBuf   *bytes.Buffer
-	readDelay  time.Duration
-	writeDelay time.Duration
-	closed     bool
+	readBuf     *bytes.Buffer
+	writeBuf    *bytes.Buffer
+	readDelay   time.Duration
+	writeDelay  time.Duration
+	closed      bool
 	closedWrite bool
 }
 
@@ -755,6 +757,44 @@ func TestToPoolConfig(t *testing.T) {
 				t.Error("IdleTimeout should be > 0")
 			}
 		})
+	}
+}
+
+func TestGetOrCreateTransport_UsesSharedDialer(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Listen: "127.0.0.1", Port: 3128},
+		Proxies: []config.ProxyConfig{
+			{Name: "direct", Type: "direct"},
+			{Name: "upstream", Type: "http", Host: "127.0.0.1", Port: 8080},
+		},
+		Rules: []config.Rule{
+			{Match: "default", Proxy: "direct"},
+		},
+	}
+	r := router.New(cfg)
+	s := New(r, cfg, "/dev/null")
+	defer s.Close()
+
+	directTransport, err := s.getOrCreateTransport(&cfg.Proxies[0])
+	if err != nil {
+		t.Fatalf("getOrCreateTransport(direct) failed: %v", err)
+	}
+	if directTransport.DialContext == nil {
+		t.Fatal("direct transport DialContext is nil")
+	}
+	if reflect.ValueOf(directTransport.DialContext).Pointer() != reflect.ValueOf(proxy.DirectDialContext).Pointer() {
+		t.Fatal("direct transport is not using proxy.DirectDialContext")
+	}
+
+	httpTransport, err := s.getOrCreateTransport(&cfg.Proxies[1])
+	if err != nil {
+		t.Fatalf("getOrCreateTransport(http) failed: %v", err)
+	}
+	if httpTransport.DialContext == nil {
+		t.Fatal("http transport DialContext is nil")
+	}
+	if reflect.ValueOf(httpTransport.DialContext).Pointer() != reflect.ValueOf(proxy.DirectDialContext).Pointer() {
+		t.Fatal("http transport is not using proxy.DirectDialContext")
 	}
 }
 

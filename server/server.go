@@ -29,14 +29,14 @@ var bufferPool = sync.Pool{
 }
 
 type Server struct {
-	router         *router.Router
-	routerMu       sync.RWMutex
-	listen         string
-	port           int
-	configFile     string
-	transports     map[string]*http.Transport
-	transportMu    sync.RWMutex
-	connPool       *proxy.Pool
+	router      *router.Router
+	routerMu    sync.RWMutex
+	listen      string
+	port        int
+	configFile  string
+	transports  map[string]*http.Transport
+	transportMu sync.RWMutex
+	connPool    *proxy.Pool
 }
 
 func New(r *router.Router, cfg *config.Config, configFile string) *Server {
@@ -128,6 +128,7 @@ func (s *Server) getOrCreateTransport(proxyConfig *config.ProxyConfig) (*http.Tr
 	switch proxyConfig.Type {
 	case "direct":
 		newTransport = &http.Transport{
+			DialContext:         proxy.DirectDialContext,
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
@@ -149,6 +150,7 @@ func (s *Server) getOrCreateTransport(proxyConfig *config.ProxyConfig) (*http.Tr
 		}
 		newTransport = &http.Transport{
 			Proxy:               http.ProxyURL(proxyURLParsed),
+			DialContext:         proxy.DirectDialContext,
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,

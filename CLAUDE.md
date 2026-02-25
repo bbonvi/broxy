@@ -59,6 +59,7 @@ check rules.yaml.example for example usage.
 - **Buffer pool**: sync.Pool with 32KB buffers for io.CopyBuffer; avoids allocations per copy
 - **TCP tuning**: SetNoDelay(true), SetKeepAlive(30s) on both ends of CONNECT tunnels
 - **Dial timeout**: 30s default via package-level defaultDialer
+- **DNS strategy**: Prefer Go resolver for faster/parallel lookups, with fallback to system resolver on non-timeout DNS resolution failures
 - **Optimizations**: 10x faster data copy, 2.6x fewer allocations for typical CONNECT operations
 
 # Development
